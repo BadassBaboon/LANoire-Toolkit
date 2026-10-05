@@ -75,9 +75,7 @@ class WadArchive:
                 raw_entries.append((h, off, sz))
 
             # Names table follows the last file data
-            f.seek(8 + 4 + (file_count - 1) * 12)
-            last_off, last_sz = struct.unpack("<2I", f.read(8))
-            names_offset = last_off + last_sz
+            names_offset = max(off + sz for _, off, sz in raw_entries)
 
             f.seek(names_offset)
             names: list[str] = []

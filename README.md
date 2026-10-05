@@ -1,6 +1,6 @@
 # L.A. Noire PC Toolkit
 
-A tool and graphical interface for extracting, inspecting, editing, and repacking L.A. Noire `.big.pc` and `.wad.pc` archives. It supports both MotionScan `DGAD` facial video performances and static `trM#` character skin textures in the PC version of L.A. Noire.
+A tool and graphical interface for extracting, inspecting, editing, and repacking L.A. Noire `.big.pc` and `.wad.pc` archives. It supports both MotionScan `DGAD` facial video performances and static `trM#` character skin textures.
 
 ## Requirements
 

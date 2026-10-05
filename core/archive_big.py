@@ -240,11 +240,12 @@ class BigArchive:
         target_entry.custom_data = new_data
         if size1 is not None:
             target_entry.size1 = size1
-        elif not target_entry.is_compressed:
+        else:
             target_entry.size1 = len(new_data)
-            target_entry.size2 = 0
         if size2 is not None:
             target_entry.size2 = size2
+        elif size1 is None:
+            target_entry.size2 = 0
         return True
 
     def repack(
@@ -289,9 +290,13 @@ class BigArchive:
                         s1 = entry.size1 or len(entry.custom_data)
                         s2 = entry.size2
                     else:
-                        comp_size = 0 if not entry.is_compressed else len(data_to_write)
-                        s1 = len(data_to_write) if not entry.is_compressed else (entry.size1 or len(entry.custom_data))
-                        s2 = 0 if not entry.is_compressed else entry.size2
+                        comp_size = 0
+                        if entry.size1 + entry.size2 == len(entry.custom_data):
+                            s1 = entry.size1
+                            s2 = entry.size2
+                        else:
+                            s1 = len(entry.custom_data)
+                            s2 = 0
                 else:
                     # Stream directly from original file without re-compressing
                     f_in.seek(entry.offset)

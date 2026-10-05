@@ -65,7 +65,7 @@ def create_dds_header(
         flags |= 0x20000  # DDSD_MIPMAPCOUNT
     flags |= 0x80000      # DDSD_LINEARSIZE
 
-    pitch_linear = max(1, ((width + 3) // 4)) * (8 if fourcc == "DXT1" else 16)
+    pitch_linear = max(1, ((width + 3) // 4)) * max(1, ((height + 3) // 4)) * (8 if fourcc == "DXT1" else 16)
     reserved1 = b"\x00" * 44
 
     # DDPF

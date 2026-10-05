@@ -471,8 +471,7 @@ def batch_export_face_videos(
 
     da_entries = [
         e for e in archive.entries
-        if getattr(e, "magic", None) == b"DGAD"
-        or (e.path.startswith("intermediate/chunks/da/") and e.path.endswith(".chunk"))
+        if getattr(e, "magic", None) == b"DGAD" or "da/" in e.path.lower()
     ]
     if character_filter:
         filt = character_filter.lower().strip()
@@ -588,7 +587,7 @@ def batch_import_face_videos(
     da_by_hash: dict[int, Any] = {}
 
     for e in archive.entries:
-        if getattr(e, "magic", None) == b"DGAD" or (e.path.startswith("intermediate/chunks/da/") and e.path.endswith(".chunk")):
+        if getattr(e, "magic", None) == b"DGAD" or "da/" in e.path.lower():
             s = Path(e.path).stem.lower()
             da_by_stem[s] = e
             da_by_stem[f"0x{e.hash:08x}".lower()] = e

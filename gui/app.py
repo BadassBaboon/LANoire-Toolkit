@@ -75,14 +75,14 @@ class LANoireToolkitApp(tb.Window):
 
         tb.Button(
             toolbar,
-            text="📂 Open Archive...",
+            text="Open Archive...",
             bootstyle="primary",
             command=self._on_open_archive_dialog,
         ).pack(side=LEFT, padx=3)
 
         self.btn_deploy = tb.Button(
             toolbar,
-            text="💾 Save (In-Place .bak)",
+            text="Save (In-Place .bak)",
             bootstyle="warning",
             state=DISABLED,
             command=self._on_deploy_to_game,
@@ -91,7 +91,7 @@ class LANoireToolkitApp(tb.Window):
 
         self.btn_repack = tb.Button(
             toolbar,
-            text="💾 Repack as New...",
+            text="Repack as New...",
             bootstyle="success",
             state=DISABLED,
             command=self._on_repack_archive,
@@ -102,7 +102,7 @@ class LANoireToolkitApp(tb.Window):
 
         self.btn_batch_export_video = tb.Button(
             toolbar,
-            text="🎬 Batch Export Videos...",
+            text="Batch Export Videos...",
             bootstyle="outline-warning",
             state=DISABLED,
             command=self._on_batch_export_face_videos,
@@ -111,7 +111,7 @@ class LANoireToolkitApp(tb.Window):
 
         self.btn_batch_import_video = tb.Button(
             toolbar,
-            text="🎬 Batch Import Videos...",
+            text="Batch Import Videos...",
             bootstyle="outline-success",
             state=DISABLED,
             command=self._on_batch_import_face_videos,
@@ -122,7 +122,7 @@ class LANoireToolkitApp(tb.Window):
 
         self.btn_batch_inject = tb.Button(
             toolbar,
-            text="⚡ Batch Textures (Heads)...",
+            text="Batch Textures (Heads)...",
             bootstyle="outline-primary",
             state=DISABLED,
             command=self._on_batch_inject_folder,
@@ -133,7 +133,7 @@ class LANoireToolkitApp(tb.Window):
         filter_bar = tb.Frame(self, padding=(8, 4))
         filter_bar.pack(fill=X, side=TOP)
 
-        tb.Label(filter_bar, text="🔍 Search:", font=("Segoe UI", 9, "bold")).pack(side=LEFT, padx=(4, 2))
+        tb.Label(filter_bar, text="Search:", font=("Segoe UI", 9, "bold")).pack(side=LEFT, padx=(4, 2))
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *args: self._apply_filter())
         self.search_entry = tb.Entry(filter_bar, textvariable=self.search_var, width=28)
@@ -214,24 +214,24 @@ class LANoireToolkitApp(tb.Window):
 
         # Context Menu for Treeview
         self.context_menu = tk.Menu(self, tearoff=0)
-        self.context_menu.add_command(label="🖼️ Export as PNG", command=self._on_export_active_as_png)
-        self.context_menu.add_command(label="📦 Export as DDS", command=self._on_export_active_as_dds)
-        self.context_menu.add_command(label="🎬 Export Face Video (.mp4)", command=lambda: self._on_export_active_face_video("mp4"))
-        self.context_menu.add_command(label="🎬 Export Face Video (.ogv)", command=lambda: self._on_export_active_face_video("ogv"))
-        self.context_menu.add_command(label="📄 Extract Raw Chunk", command=self._on_extract_selected)
+        self.context_menu.add_command(label="Export as PNG", command=self._on_export_active_as_png)
+        self.context_menu.add_command(label="Export as DDS", command=self._on_export_active_as_dds)
+        self.context_menu.add_command(label="Export Face Video (.mp4)", command=lambda: self._on_export_active_face_video("mp4"))
+        self.context_menu.add_command(label="Export Face Video (.ogv)", command=lambda: self._on_export_active_face_video("ogv"))
+        self.context_menu.add_command(label="Extract Raw Chunk", command=self._on_extract_selected)
         self.context_menu.add_separator()
-        self.context_menu.add_command(label="✨ Inject Texture (PNG/DDS)...", command=self._on_inject_upscaled_texture)
-        self.context_menu.add_command(label="✨ Inject Face Video (.mp4/.ogv)...", command=self._on_inject_face_video)
+        self.context_menu.add_command(label="Inject Texture (PNG/DDS)...", command=self._on_inject_upscaled_texture)
+        self.context_menu.add_command(label="Inject Face Video (.mp4/.ogv)...", command=self._on_inject_face_video)
         self.tree.bind("<Button-3>", self._on_tree_right_click)
 
         # Action buttons below tree
         tree_actions = tb.Frame(left_frame, padding=(0, 6))
         tree_actions.grid(row=2, column=0, columnspan=2, sticky="ew")
 
-        tb.Button(tree_actions, text="🖼️ Export PNG", bootstyle="outline-success", command=self._on_export_active_as_png).pack(side=LEFT, padx=3)
-        tb.Button(tree_actions, text="📦 Export DDS", bootstyle="outline-info", command=self._on_export_active_as_dds).pack(side=LEFT, padx=3)
-        tb.Button(tree_actions, text="🎬 Export Video", bootstyle="outline-warning", command=lambda: self._on_export_active_face_video("mp4")).pack(side=LEFT, padx=3)
-        tb.Button(tree_actions, text="📄 Extract Raw", bootstyle="outline-secondary", command=self._on_extract_selected).pack(side=LEFT, padx=3)
+        tb.Button(tree_actions, text="Export PNG", bootstyle="outline-success", command=self._on_export_active_as_png).pack(side=LEFT, padx=3)
+        tb.Button(tree_actions, text="Export DDS", bootstyle="outline-info", command=self._on_export_active_as_dds).pack(side=LEFT, padx=3)
+        tb.Button(tree_actions, text="Export Video", bootstyle="outline-warning", command=lambda: self._on_export_active_face_video("mp4")).pack(side=LEFT, padx=3)
+        tb.Button(tree_actions, text="Extract Raw", bootstyle="outline-secondary", command=self._on_extract_selected).pack(side=LEFT, padx=3)
         tb.Button(tree_actions, text="Extract All Chunks...", bootstyle="outline-dark", command=self._on_extract_all).pack(side=RIGHT, padx=3)
         tb.Button(tree_actions, text="Extract Faces (PNG)...", bootstyle="outline-warning", command=self._on_extract_all_faces).pack(side=RIGHT, padx=3)
 
@@ -253,7 +253,7 @@ class LANoireToolkitApp(tb.Window):
 
         self.btn_export_png = tb.Button(
             tex_action_bar,
-            text="🖼️ Export as PNG",
+            text="Export as PNG",
             bootstyle="success",
             command=self._on_export_active_as_png,
         )
@@ -261,7 +261,7 @@ class LANoireToolkitApp(tb.Window):
 
         self.btn_export_dds = tb.Button(
             tex_action_bar,
-            text="📦 Export as DDS",
+            text="Export as DDS",
             bootstyle="info",
             command=self._on_export_active_as_dds,
         )
@@ -269,21 +269,21 @@ class LANoireToolkitApp(tb.Window):
 
         self.btn_export_video_mp4 = tb.Button(
             tex_action_bar,
-            text="🎬 Export Face Video (.mp4)",
+            text="Export Face Video (.mp4)",
             bootstyle="success",
             command=lambda: self._on_export_active_face_video("mp4"),
         )
 
         self.btn_export_video_ogv = tb.Button(
             tex_action_bar,
-            text="🎬 Export as .ogv",
+            text="Export as .ogv",
             bootstyle="outline-success",
             command=lambda: self._on_export_active_face_video("ogv"),
         )
 
         self.btn_replace_tex = tb.Button(
             tex_action_bar,
-            text="✨ Inject Texture (PNG/DDS)",
+            text="Inject Texture (PNG/DDS)",
             bootstyle="primary",
             command=self._on_inject_upscaled_texture,
         )
@@ -291,7 +291,7 @@ class LANoireToolkitApp(tb.Window):
 
         self.btn_inject_video = tb.Button(
             tex_action_bar,
-            text="✨ Inject Video (.mp4/.ogv)",
+            text="Inject Video (.mp4/.ogv)",
             bootstyle="primary",
             command=self._on_inject_face_video,
         )
@@ -511,12 +511,12 @@ class LANoireToolkitApp(tb.Window):
                     self.active_image = preview_img
                     self._display_image(preview_img)
                 else:
-                    self.image_label.config(image="", text="🎬 MotionScan Facial Performance Video\n(Preview requires FFmpeg)")
+                    self.image_label.config(image="", text="MotionScan Facial Performance Video\n(Preview requires FFmpeg)")
                     self.preview_image_ref = None
 
                 dur = len(dgad.frames) / (dgad.fps or 30)
                 self.tex_info_label.config(
-                    text=f"🎬 MotionScan Face Video | {dgad.resolution}x{dgad.resolution} @ {dgad.fps} FPS | "
+                    text=f"MotionScan Face Video | {dgad.resolution}x{dgad.resolution} @ {dgad.fps} FPS | "
                          f"Frames: {len(dgad.frames)} ({dur:.2f}s) | Normals: {dgad.macroblock_scale*2}x{dgad.macroblock_scale*2} | "
                          f"Size: {len(raw_data):,} bytes"
                 )
@@ -647,8 +647,11 @@ class LANoireToolkitApp(tb.Window):
         if not dest:
             return
 
-        self.active_image.save(dest)
-        messagebox.showinfo("Exported PNG", f"Successfully saved to:\n{Path(dest).name}")
+        try:
+            self.active_image.save(dest)
+            messagebox.showinfo("Exported PNG", f"Successfully saved to:\n{Path(dest).name}")
+        except Exception as e:
+            messagebox.showerror("Export Failed", f"Failed to save PNG image:\n{e}")
 
     def _on_export_active_as_dds(self):
         """Exports the active texture directly as a standard DDS file."""
@@ -674,8 +677,11 @@ class LANoireToolkitApp(tb.Window):
         if not dest:
             return
 
-        Path(dest).write_bytes(self.active_dds_bytes)
-        messagebox.showinfo("Exported DDS", f"Successfully saved to:\n{Path(dest).name}")
+        try:
+            Path(dest).write_bytes(self.active_dds_bytes)
+            messagebox.showinfo("Exported DDS", f"Successfully saved to:\n{Path(dest).name}")
+        except Exception as e:
+            messagebox.showerror("Export Failed", f"Failed to save DDS file:\n{e}")
 
     def _on_inject_upscaled_texture(self):
         """Prompts for an edited PNG or DDS and injects it into the active slot/entry."""
@@ -814,8 +820,6 @@ class LANoireToolkitApp(tb.Window):
         char_filter = self.search_var.get().strip()
 
         def run_export():
-            self.progress_bar.config(mode="determinate", value=0)
-            self.status_label.config(text="Exporting face videos...")
             try:
                 count = batch_export_face_videos(
                     self.archive,
@@ -835,6 +839,8 @@ class LANoireToolkitApp(tb.Window):
             finally:
                 self.after(0, lambda: self.status_label.config(text="Ready."))
 
+        self.progress_bar.config(mode="determinate", value=0)
+        self.status_label.config(text="Exporting face videos...")
         threading.Thread(target=run_export, daemon=True).start()
 
     def _on_batch_import_face_videos(self):
@@ -848,8 +854,6 @@ class LANoireToolkitApp(tb.Window):
             return
 
         def run_import():
-            self.progress_bar.config(mode="determinate", value=0)
-            self.status_label.config(text="Scanning and importing face videos...")
             try:
                 injected = batch_import_face_videos(
                     self.archive,
@@ -877,6 +881,8 @@ class LANoireToolkitApp(tb.Window):
             finally:
                 self.after(0, lambda: self.status_label.config(text="Ready."))
 
+        self.progress_bar.config(mode="determinate", value=0)
+        self.status_label.config(text="Scanning and importing face videos...")
         threading.Thread(target=run_import, daemon=True).start()
 
     def _on_extract_selected(self):
@@ -900,9 +906,10 @@ class LANoireToolkitApp(tb.Window):
         if not dest:
             return
 
+        total = len(self.archive.entries)
+        self.progress_bar.config(maximum=total, value=0)
+
         def task():
-            total = len(self.archive.entries)
-            self.progress_bar.config(maximum=total, value=0)
             self.archive.extract_all(
                 dest,
                 progress_cb=lambda i, tot, name: self._update_progress(i, tot, f"Extracting {name}..."),
@@ -929,7 +936,7 @@ class LANoireToolkitApp(tb.Window):
                 self.after(0, lambda: messagebox.showinfo("No Heads", "No character head chunks found in this archive."))
                 return
 
-            self.progress_bar.config(maximum=total, value=0)
+            self.after(0, lambda: self.progress_bar.config(maximum=total, value=0))
             extracted = 0
 
             for i, entry in enumerate(head_entries):
@@ -1029,7 +1036,7 @@ class LANoireToolkitApp(tb.Window):
                 self.after(0, lambda: messagebox.showinfo("No Matches", "Could not match any images in the folder to character heads in this archive."))
                 return
 
-            self.progress_bar.config(maximum=total, value=0)
+            self.after(0, lambda: self.progress_bar.config(maximum=total, value=0))
             applied = 0
 
             for i, (entry_hash, update_info) in enumerate(updates_by_entry.items()):
@@ -1097,9 +1104,10 @@ class LANoireToolkitApp(tb.Window):
             self._execute_repack(self.archive.path)
 
     def _execute_repack(self, dest_path: Path):
+        total = len(self.archive.entries)
+        self.progress_bar.config(maximum=total, value=0)
+
         def task():
-            total = len(self.archive.entries)
-            self.progress_bar.config(maximum=total, value=0)
             try:
                 self.archive.repack(
                     dest_path,
