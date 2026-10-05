@@ -35,6 +35,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Local user configuration
+config.json
+
 # Local testing and scratch data
 extracted_test/
 test_*.py

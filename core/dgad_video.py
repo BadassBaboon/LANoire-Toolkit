@@ -89,35 +89,12 @@ def demux_ogg_packets(ogv_data: bytes) -> list[bytes]:
     return packets
 
 
+from .config import get_ffmpeg_path
+
+
 def find_ffmpeg() -> Optional[str]:
-    """Finds FFmpeg executable in PATH or known default directories."""
-    # Check environment variable first
-    env_p = os.environ.get("FFMPEG_PATH")
-    if env_p and Path(env_p).is_file():
-        return env_p
-
-    # Check system PATH
-    which_p = shutil.which("ffmpeg")
-    if which_p:
-        return which_p
-
-    # Check local directories and standard install locations
-    local_candidates = [
-        Path.cwd() / "ffmpeg.exe",
-        Path.cwd() / "bin" / "ffmpeg.exe",
-        Path(__file__).resolve().parent.parent / "bin" / "ffmpeg.exe",
-        Path(os.path.expandvars(r"%ProgramFiles%\ffmpeg\bin\ffmpeg.exe")),
-        Path(r"C:\ffmpeg\bin\ffmpeg.exe"),
-        Path(r"C:\ffmpeg\ffmpeg.exe"),
-        Path(os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Links\ffmpeg.exe")),
-        Path(os.path.expandvars(r"%USERPROFILE%\scoop\shims\ffmpeg.exe")),
-        Path(os.path.expandvars(r"%ProgramData%\chocolatey\bin\ffmpeg.exe")),
-    ]
-    for c in local_candidates:
-        if c.is_file():
-            return str(c)
-
-    return None
+    """Finds FFmpeg executable via user configuration, PATH, or standard directories."""
+    return get_ffmpeg_path()
 
 
 @dataclass

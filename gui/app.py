@@ -36,6 +36,15 @@ from core.dgad_video import (
     batch_import_face_videos,
     find_ffmpeg,
 )
+from core.config import (
+    load_config,
+    save_config,
+    get_ffmpeg_path,
+    set_ffmpeg_path,
+    detect_all_ffmpeg_candidates,
+    get_config_value,
+    set_config_value,
+)
 
 
 class LANoireToolkitApp(tb.Window):
@@ -128,6 +137,14 @@ class LANoireToolkitApp(tb.Window):
             command=self._on_batch_inject_folder,
         )
         self.btn_batch_inject.pack(side=LEFT, padx=3)
+
+        self.btn_settings = tb.Button(
+            toolbar,
+            text="Settings...",
+            bootstyle="outline-secondary",
+            command=self._on_open_settings,
+        )
+        self.btn_settings.pack(side=RIGHT, padx=3)
 
         # Row 2: Search & Filter Bar (Dedicated full-width row)
         filter_bar = tb.Frame(self, padding=(8, 4))
@@ -303,6 +320,13 @@ class LANoireToolkitApp(tb.Window):
             command=self._on_inject_face_video,
         )
 
+        self.btn_configure_ffmpeg = tb.Button(
+            tex_action_bar,
+            text="Configure FFmpeg...",
+            bootstyle="warning",
+            command=self._on_open_settings,
+        )
+
         # Multi-Texture Sub-Selector Frame (Diffuse, Normal, Specular, etc.)
         self.subtex_frame = tb.Labelframe(self.tab_texture, text="Texture Slots in Container", padding=8)
         self.subtex_frame.pack(fill=X, side=TOP, pady=(0, 6))
@@ -351,13 +375,129 @@ class LANoireToolkitApp(tb.Window):
     def _clear_search(self):
         self.search_var.set("")
 
+    def _on_open_settings(self):
+        """Displays the settings dialog to configure tool paths and options."""
+        dialog = tb.Toplevel(self)
+        dialog.title("Toolkit Settings")
+        dialog.geometry("620x400")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        cfg = load_config()
+
+        # FFmpeg Section
+        ff_frame = tb.Labelframe(dialog, text="FFmpeg Configuration", padding=12)
+        ff_frame.pack(fill=X, padx=12, pady=(12, 6))
+
+        cur_ff = get_ffmpeg_path() or ""
+        status_text = "Status: Configured and Ready" if (cur_ff and Path(cur_ff).is_file()) else "Status: Not Found (Required for video preview and export)"
+        status_style = "success" if (cur_ff and Path(cur_ff).is_file()) else "warning"
+
+        lbl_status = tb.Label(ff_frame, text=status_text, bootstyle=status_style, font=("Segoe UI", 9, "bold"))
+        lbl_status.pack(anchor=W, pady=(0, 6))
+
+        path_row = tb.Frame(ff_frame)
+        path_row.pack(fill=X, pady=2)
+
+        ff_entry_var = tk.StringVar(value=cur_ff)
+        ff_entry = tb.Entry(path_row, textvariable=ff_entry_var, width=50)
+        ff_entry.pack(side=LEFT, fill=X, expand=True, padx=(0, 6))
+
+        def browse_ffmpeg():
+            chosen = filedialog.askopenfilename(
+                parent=dialog,
+                title="Select FFmpeg Executable",
+                filetypes=[
+                    ("FFmpeg Executable (ffmpeg.exe)", "ffmpeg.exe"),
+                    ("Executables (*.exe)", "*.exe"),
+                    ("All Files (*.*)", "*.*"),
+                ],
+            )
+            if chosen:
+                ff_entry_var.set(chosen)
+                lbl_status.config(text="Status: Path Selected", bootstyle="info")
+
+        tb.Button(path_row, text="Browse...", bootstyle="outline-primary", command=browse_ffmpeg).pack(side=RIGHT)
+
+        # Dropdown for detected candidates
+        candidates = detect_all_ffmpeg_candidates()
+        if candidates:
+            cand_row = tb.Frame(ff_frame)
+            cand_row.pack(fill=X, pady=(6, 0))
+            tb.Label(cand_row, text="Detected on system:").pack(side=LEFT, padx=(0, 6))
+
+            cand_combo = tb.Combobox(cand_row, values=candidates, state="readonly", width=44)
+            if cur_ff in candidates:
+                cand_combo.set(cur_ff)
+            else:
+                cand_combo.set(candidates[0])
+            cand_combo.pack(side=LEFT, fill=X, expand=True)
+
+            def on_select_candidate(e):
+                val = cand_combo.get()
+                if val:
+                    ff_entry_var.set(val)
+                    lbl_status.config(text="Status: Selected from Detected", bootstyle="info")
+
+            cand_combo.bind("<<ComboboxSelected>>", on_select_candidate)
+
+        # Game Directory Section (Optional)
+        game_frame = tb.Labelframe(dialog, text="Game Directory (Optional)", padding=12)
+        game_frame.pack(fill=X, padx=12, pady=6)
+
+        cur_game = cfg.get("game_path", "")
+        game_entry_var = tk.StringVar(value=cur_game)
+        game_row = tb.Frame(game_frame)
+        game_row.pack(fill=X)
+
+        game_entry = tb.Entry(game_row, textvariable=game_entry_var, width=50)
+        game_entry.pack(side=LEFT, fill=X, expand=True, padx=(0, 6))
+
+        def browse_game():
+            chosen = filedialog.askdirectory(parent=dialog, title="Select L.A. Noire Directory")
+            if chosen:
+                game_entry_var.set(chosen)
+
+        tb.Button(game_row, text="Browse...", bootstyle="outline-primary", command=browse_game).pack(side=RIGHT)
+
+        # Dialog Buttons
+        btn_box = tb.Frame(dialog, padding=(12, 10))
+        btn_box.pack(fill=X, side=BOTTOM)
+
+        def save_and_close():
+            new_ff = ff_entry_var.get().strip()
+            new_game = game_entry_var.get().strip()
+            if new_ff:
+                if not Path(new_ff).is_file():
+                    messagebox.showerror("Invalid Path", f"FFmpeg executable not found at:\n{new_ff}", parent=dialog)
+                    return
+                set_ffmpeg_path(new_ff)
+            else:
+                set_config_value("ffmpeg_path", "")
+
+            if new_game:
+                set_config_value("game_path", new_game)
+
+            dialog.destroy()
+            messagebox.showinfo("Settings Saved", "Configuration saved successfully.")
+            if self.current_entry:
+                self._inspect_entry(self.current_entry)
+
+        tb.Button(btn_box, text="Save & Apply", bootstyle="success", command=save_and_close).pack(side=RIGHT, padx=4)
+        tb.Button(btn_box, text="Cancel", bootstyle="secondary", command=dialog.destroy).pack(side=RIGHT, padx=4)
+
     def _on_open_archive_dialog(self):
+        init_dir = get_config_value("last_open_dir") or get_config_value("game_path") or ""
         path = filedialog.askopenfilename(
             title="Open L.A. Noire Archive",
+            initialdir=init_dir if (init_dir and Path(init_dir).is_dir()) else None,
             filetypes=[("L.A. Noire Archive (*.pc)", "*.pc"), ("All Files (*.*)", "*.*")],
         )
         if path:
-            self.load_archive(Path(path))
+            p = Path(path)
+            set_config_value("last_open_dir", str(p.parent))
+            self.load_archive(p)
 
     def load_archive(self, path: Path):
         self.status_label.config(text=f"Loading {path.name}...")
@@ -549,15 +689,23 @@ class LANoireToolkitApp(tb.Window):
             self.btn_export_png.pack_forget()
             self.btn_export_dds.pack_forget()
             self.btn_replace_tex.pack_forget()
-            self.btn_export_video_mp4.pack(side=LEFT, padx=3)
-            self.btn_export_video_ogv.pack(side=LEFT, padx=3)
-            self.btn_inject_video.pack(side=RIGHT, padx=3)
-            self.btn_export_video_mp4.config(state=NORMAL)
-            self.btn_export_video_ogv.config(state=NORMAL)
-            self.btn_inject_video.config(state=NORMAL)
+            if find_ffmpeg():
+                self.btn_configure_ffmpeg.pack_forget()
+                self.btn_export_video_mp4.pack(side=LEFT, padx=3)
+                self.btn_export_video_ogv.pack(side=LEFT, padx=3)
+                self.btn_inject_video.pack(side=RIGHT, padx=3)
+                self.btn_export_video_mp4.config(state=NORMAL)
+                self.btn_export_video_ogv.config(state=NORMAL)
+                self.btn_inject_video.config(state=NORMAL)
+            else:
+                self.btn_export_video_mp4.pack_forget()
+                self.btn_export_video_ogv.pack_forget()
+                self.btn_inject_video.pack_forget()
+                self.btn_configure_ffmpeg.pack(side=LEFT, padx=3)
         elif has_texture:
             self.notebook.select(self.tab_texture)
             # Show static texture controls, hide video controls
+            self.btn_configure_ffmpeg.pack_forget()
             self.btn_export_video_mp4.pack_forget()
             self.btn_export_video_ogv.pack_forget()
             self.btn_inject_video.pack_forget()
@@ -572,6 +720,7 @@ class LANoireToolkitApp(tb.Window):
             self.image_label.config(image="", text="No image or texture found in this chunk.")
             self.preview_image_ref = None
             self.tex_info_label.config(text=f"Chunk Data: {len(raw_data):,} bytes (Binary/Model/Mocap)")
+            self.btn_configure_ffmpeg.pack_forget()
             self.btn_export_video_mp4.pack_forget()
             self.btn_export_video_ogv.pack_forget()
             self.btn_inject_video.pack_forget()

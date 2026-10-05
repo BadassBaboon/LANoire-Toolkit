@@ -15,6 +15,15 @@ from .dds_utils import (
 from .trm_processor import TRMContainer, TRMSubfile, FaceTextureSet
 from .archive_big import BigArchive, BigArchiveEntry
 from .archive_wad import WadArchive, WadArchiveEntry
+from .config import (
+    load_config,
+    save_config,
+    get_config_value,
+    set_config_value,
+    get_ffmpeg_path,
+    set_ffmpeg_path,
+    detect_all_ffmpeg_candidates,
+)
 
 __all__ = [
     "HashDatabase",
@@ -31,4 +40,11 @@ __all__ = [
     "BigArchiveEntry",
     "WadArchive",
     "WadArchiveEntry",
+    "load_config",
+    "save_config",
+    "get_config_value",
+    "set_config_value",
+    "get_ffmpeg_path",
+    "set_ffmpeg_path",
+    "detect_all_ffmpeg_candidates",
 ]
