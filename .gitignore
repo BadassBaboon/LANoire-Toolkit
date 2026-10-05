@@ -1,0 +1,74 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Local testing and scratch data
+extracted_test/
+test_*.py
+scratch/
+tmp/
+*.tmp
+*.tmp_big
+
+# L.A. Noire game archives and backups (prevent accidental commits of game assets)
+*.big.pc
+*.wad.pc
+*.pc.bak
+*.big.pc.bak
+*.wad.pc.bak
+*.bak
+*.log
+
+# Media exports
+*.mp4
+*.ogv
+*.mkv
+*.dds
+*.raw
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
+
+# Operating System files
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.directory
