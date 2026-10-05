@@ -101,17 +101,21 @@ def find_ffmpeg() -> Optional[str]:
     if which_p:
         return which_p
 
-    # Known common locations
-    candidates = [
-        r"E:\ComfyUI_Windows_portable\python_standalone\Scripts\ffmpeg.exe",
-        r"C:\ffmpeg\bin\ffmpeg.exe",
-        r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
-        r"D:\ffmpeg\bin\ffmpeg.exe",
-        r"E:\ffmpeg\bin\ffmpeg.exe",
+    # Check local directories and standard install locations
+    local_candidates = [
+        Path.cwd() / "ffmpeg.exe",
+        Path.cwd() / "bin" / "ffmpeg.exe",
+        Path(__file__).resolve().parent.parent / "bin" / "ffmpeg.exe",
+        Path(os.path.expandvars(r"%ProgramFiles%\ffmpeg\bin\ffmpeg.exe")),
+        Path(r"C:\ffmpeg\bin\ffmpeg.exe"),
+        Path(r"C:\ffmpeg\ffmpeg.exe"),
+        Path(os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Links\ffmpeg.exe")),
+        Path(os.path.expandvars(r"%USERPROFILE%\scoop\shims\ffmpeg.exe")),
+        Path(os.path.expandvars(r"%ProgramData%\chocolatey\bin\ffmpeg.exe")),
     ]
-    for c in candidates:
-        if Path(c).is_file():
-            return c
+    for c in local_candidates:
+        if c.is_file():
+            return str(c)
 
     return None
 

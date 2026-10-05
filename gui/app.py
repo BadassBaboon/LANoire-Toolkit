@@ -41,7 +41,7 @@ from core.dgad_video import (
 class LANoireToolkitApp(tb.Window):
     def __init__(self):
         super().__init__(
-            title="L.A. Noire PC Toolkit - Texture & Face Editor",
+            title="L.A. Noire PC Toolkit",
             themename="darkly",
             size=(1320, 840),
             minsize=(960, 600),
@@ -141,7 +141,7 @@ class LANoireToolkitApp(tb.Window):
 
         tb.Button(
             filter_bar,
-            text="✕",
+            text="X",
             bootstyle="secondary-outline",
             width=2,
             command=self._clear_search,
@@ -225,15 +225,22 @@ class LANoireToolkitApp(tb.Window):
         self.tree.bind("<Button-3>", self._on_tree_right_click)
 
         # Action buttons below tree
-        tree_actions = tb.Frame(left_frame, padding=(0, 6))
+        tree_actions = tb.Frame(left_frame, padding=(0, 4))
         tree_actions.grid(row=2, column=0, columnspan=2, sticky="ew")
 
-        tb.Button(tree_actions, text="Export PNG", bootstyle="outline-success", command=self._on_export_active_as_png).pack(side=LEFT, padx=3)
-        tb.Button(tree_actions, text="Export DDS", bootstyle="outline-info", command=self._on_export_active_as_dds).pack(side=LEFT, padx=3)
-        tb.Button(tree_actions, text="Export Video", bootstyle="outline-warning", command=lambda: self._on_export_active_face_video("mp4")).pack(side=LEFT, padx=3)
-        tb.Button(tree_actions, text="Extract Raw", bootstyle="outline-secondary", command=self._on_extract_selected).pack(side=LEFT, padx=3)
-        tb.Button(tree_actions, text="Extract All Chunks...", bootstyle="outline-dark", command=self._on_extract_all).pack(side=RIGHT, padx=3)
-        tb.Button(tree_actions, text="Extract Faces (PNG)...", bootstyle="outline-warning", command=self._on_extract_all_faces).pack(side=RIGHT, padx=3)
+        # Row 1: Selected entry actions
+        actions_r1 = tb.Frame(tree_actions)
+        actions_r1.pack(fill=X, side=TOP, pady=(0, 3))
+        tb.Button(actions_r1, text="Export PNG", bootstyle="outline-success", command=self._on_export_active_as_png).pack(side=LEFT, padx=2)
+        tb.Button(actions_r1, text="Export DDS", bootstyle="outline-info", command=self._on_export_active_as_dds).pack(side=LEFT, padx=2)
+        tb.Button(actions_r1, text="Export Video", bootstyle="outline-warning", command=lambda: self._on_export_active_face_video("mp4")).pack(side=LEFT, padx=2)
+        tb.Button(actions_r1, text="Extract Raw", bootstyle="outline-secondary", command=self._on_extract_selected).pack(side=LEFT, padx=2)
+
+        # Row 2: Bulk extraction actions
+        actions_r2 = tb.Frame(tree_actions)
+        actions_r2.pack(fill=X, side=TOP)
+        tb.Button(actions_r2, text="Extract All Files...", bootstyle="outline-dark", command=self._on_extract_all).pack(side=LEFT, padx=2)
+        tb.Button(actions_r2, text="Extract All Faces (PNG)...", bootstyle="outline-warning", command=self._on_extract_all_faces).pack(side=LEFT, padx=2)
 
         # Right: Inspector & Preview
         right_frame = tb.Frame(main_paned, padding=8)
@@ -253,45 +260,45 @@ class LANoireToolkitApp(tb.Window):
 
         self.btn_export_png = tb.Button(
             tex_action_bar,
-            text="Export as PNG",
+            text="Export PNG",
             bootstyle="success",
             command=self._on_export_active_as_png,
         )
-        self.btn_export_png.pack(side=LEFT, padx=4)
+        self.btn_export_png.pack(side=LEFT, padx=3)
 
         self.btn_export_dds = tb.Button(
             tex_action_bar,
-            text="Export as DDS",
+            text="Export DDS",
             bootstyle="info",
             command=self._on_export_active_as_dds,
         )
-        self.btn_export_dds.pack(side=LEFT, padx=4)
+        self.btn_export_dds.pack(side=LEFT, padx=3)
 
         self.btn_export_video_mp4 = tb.Button(
             tex_action_bar,
-            text="Export Face Video (.mp4)",
+            text="Export MP4",
             bootstyle="success",
             command=lambda: self._on_export_active_face_video("mp4"),
         )
 
         self.btn_export_video_ogv = tb.Button(
             tex_action_bar,
-            text="Export as .ogv",
+            text="Export OGV",
             bootstyle="outline-success",
             command=lambda: self._on_export_active_face_video("ogv"),
         )
 
         self.btn_replace_tex = tb.Button(
             tex_action_bar,
-            text="Inject Texture (PNG/DDS)",
+            text="Inject Texture...",
             bootstyle="primary",
             command=self._on_inject_upscaled_texture,
         )
-        self.btn_replace_tex.pack(side=RIGHT, padx=4)
+        self.btn_replace_tex.pack(side=RIGHT, padx=3)
 
         self.btn_inject_video = tb.Button(
             tex_action_bar,
-            text="Inject Video (.mp4/.ogv)",
+            text="Inject Video...",
             bootstyle="primary",
             command=self._on_inject_face_video,
         )
@@ -322,11 +329,24 @@ class LANoireToolkitApp(tb.Window):
         self.tab_hex = tb.Frame(self.notebook, padding=8)
         self.notebook.add(self.tab_hex, text="Raw Metadata & Hex")
 
-        self.hex_text = tk.Text(self.tab_hex, bg="#1a1a1a", fg="#00ffcc", font=("Consolas", 10), wrap="none")
-        hex_scroll = tb.Scrollbar(self.tab_hex, orient=VERTICAL, command=self.hex_text.yview)
-        self.hex_text.configure(yscrollcommand=hex_scroll.set)
+        hex_scroll_y = tb.Scrollbar(self.tab_hex, orient=VERTICAL)
+        hex_scroll_y.pack(side=RIGHT, fill=Y)
+
+        hex_scroll_x = tb.Scrollbar(self.tab_hex, orient=HORIZONTAL)
+        hex_scroll_x.pack(side=BOTTOM, fill=X)
+
+        self.hex_text = tk.Text(
+            self.tab_hex,
+            bg="#1a1a1a",
+            fg="#00ffcc",
+            font=("Consolas", 10),
+            wrap="none",
+            yscrollcommand=hex_scroll_y.set,
+            xscrollcommand=hex_scroll_x.set,
+        )
+        hex_scroll_y.config(command=self.hex_text.yview)
+        hex_scroll_x.config(command=self.hex_text.xview)
         self.hex_text.pack(side=LEFT, fill=BOTH, expand=True)
-        hex_scroll.pack(side=RIGHT, fill=Y)
 
     def _clear_search(self):
         self.search_var.set("")
@@ -529,9 +549,9 @@ class LANoireToolkitApp(tb.Window):
             self.btn_export_png.pack_forget()
             self.btn_export_dds.pack_forget()
             self.btn_replace_tex.pack_forget()
-            self.btn_export_video_mp4.pack(side=LEFT, padx=4)
-            self.btn_export_video_ogv.pack(side=LEFT, padx=4)
-            self.btn_inject_video.pack(side=RIGHT, padx=4)
+            self.btn_export_video_mp4.pack(side=LEFT, padx=3)
+            self.btn_export_video_ogv.pack(side=LEFT, padx=3)
+            self.btn_inject_video.pack(side=RIGHT, padx=3)
             self.btn_export_video_mp4.config(state=NORMAL)
             self.btn_export_video_ogv.config(state=NORMAL)
             self.btn_inject_video.config(state=NORMAL)
@@ -541,9 +561,9 @@ class LANoireToolkitApp(tb.Window):
             self.btn_export_video_mp4.pack_forget()
             self.btn_export_video_ogv.pack_forget()
             self.btn_inject_video.pack_forget()
-            self.btn_export_png.pack(side=LEFT, padx=4)
-            self.btn_export_dds.pack(side=LEFT, padx=4)
-            self.btn_replace_tex.pack(side=RIGHT, padx=4)
+            self.btn_export_png.pack(side=LEFT, padx=3)
+            self.btn_export_dds.pack(side=LEFT, padx=3)
+            self.btn_replace_tex.pack(side=RIGHT, padx=3)
             self.btn_export_png.config(state=NORMAL)
             self.btn_export_dds.config(state=NORMAL)
             self.btn_replace_tex.config(state=NORMAL)
@@ -552,12 +572,15 @@ class LANoireToolkitApp(tb.Window):
             self.image_label.config(image="", text="No image or texture found in this chunk.")
             self.preview_image_ref = None
             self.tex_info_label.config(text=f"Chunk Data: {len(raw_data):,} bytes (Binary/Model/Mocap)")
-            self.btn_export_png.config(state=DISABLED)
-            self.btn_export_dds.config(state=DISABLED)
-            self.btn_replace_tex.config(state=DISABLED)
             self.btn_export_video_mp4.pack_forget()
             self.btn_export_video_ogv.pack_forget()
             self.btn_inject_video.pack_forget()
+            self.btn_export_png.pack(side=LEFT, padx=3)
+            self.btn_export_dds.pack(side=LEFT, padx=3)
+            self.btn_replace_tex.pack(side=RIGHT, padx=3)
+            self.btn_export_png.config(state=DISABLED)
+            self.btn_export_dds.config(state=DISABLED)
+            self.btn_replace_tex.config(state=DISABLED)
 
     def _setup_subtex_radios(self):
         """Creates radio buttons for all textures inside the container."""
@@ -573,10 +596,7 @@ class LANoireToolkitApp(tb.Window):
         self.selected_subtex_var.set(0)
 
         for i, tex in enumerate(self.current_face_set.textures):
-            w = tex.info.get("width", 0) if tex.info else 0
-            h = tex.info.get("height", 0) if tex.info else 0
-            fourcc = tex.info.get("fourcc", "") if tex.info else ""
-            label_text = f"Slot {i}: {tex.name} ({w}x{h} {fourcc})"
+            label_text = f"Slot {i}: {tex.name.capitalize()}"
             rb = tb.Radiobutton(
                 self.subtex_frame,
                 text=label_text,
