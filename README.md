@@ -181,3 +181,7 @@ Disassembly of `LANoire.exe` (specifically the vtable at `0x0125523c` for `Theor
 
 5. Resolution scaling:
    When re-encoding Stream 3 from 512x512 to 1024x1024 or 2048x2048, the toolkit updates the pixel resolution field and scales the macroblock factor proportionally. This allows the game engine to stream and map the higher resolution video across the animated face mesh without texture alignment errors.
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.
