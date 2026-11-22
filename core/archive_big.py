@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import BinaryIO, Callable, Optional
 
 from .hash_db import HashDatabase
-from .sges import SGES_MAGIC, compress_sges, decompress_sges
+from .archive_io import backup_if_needed, extraction_path, staged_output
+from .sges import recompress_sges, decompress_sges, sges_group_sizes
 
 
 @dataclass
@@ -58,33 +59,33 @@ class BigArchive:
         self.table_offset: int = 0
         self.total_file_size: int = 0
         self._load_table()
+        self._stored_sizes = [e.compressed_size or e.size1 + e.size2 for e in self.entries]
 
     def _load_table(self) -> None:
-        if not self.path.exists():
-            return
-
         with open(self.path, "rb") as f:
             f.seek(0, os.SEEK_END)
             self.total_file_size = f.tell()
             if self.total_file_size < 12:
-                return
+                raise ValueError("Incomplete BIG archive footer")
 
             f.seek(-4, os.SEEK_END)
             self.table_offset = struct.unpack("<I", f.read(4))[0]
             table_pos = self.total_file_size - self.table_offset
-            if table_pos < 0 or table_pos >= self.total_file_size:
-                return
+            if table_pos < 0 or self.table_offset < 12:
+                raise ValueError("Invalid BIG table offset")
 
             f.seek(table_pos)
             archive_type, num_entries = struct.unpack("<2I", f.read(8))
-            if archive_type != 3:
-                return
+            if archive_type != 3 or self.table_offset != 12 + 20 * num_entries:
+                raise ValueError("Unsupported or incomplete BIG table")
 
             if num_entries > 0:
                 self.is_case_0 = False
                 for _ in range(num_entries):
                     h, off_raw, s1, s2, s3 = struct.unpack("<5I", f.read(20))
                     real_off = off_raw << 4
+                    if real_off + (s3 or s1 + s2) > table_pos:
+                        raise ValueError("BIG entry extends beyond the data area")
                     is_comp = (s3 != 0)
                     self.entries.append(
                         BigArchiveEntry(
@@ -132,6 +133,8 @@ class BigArchive:
                 total_seg_sz = (data_offset - curr_offset) + total_payload_sz
                 total_seg_aligned = (total_seg_sz + 15) & ~15
 
+                if curr_offset + total_seg_aligned > table_pos:
+                    raise ValueError("Incomplete sequential SGES segment")
                 dummy_hash = self.hash_db.calc_hash(f"segments/{seg_idx:06d}.sges")
                 self.entries.append(
                     BigArchiveEntry(
@@ -153,11 +156,11 @@ class BigArchive:
                 # Skip any zero / 'X' padding
                 f.seek(curr_offset)
                 pad = f.read(16)
-                while pad in (b"X" * 16, b"\x00" * 16) and curr_offset + 16 < table_pos:
+                while pad in (b"X" * 16, b"\x00" * 16) and curr_offset < table_pos:
                     curr_offset += 16
                     pad = f.read(16)
             else:
-                break
+                raise ValueError(f"Unrecognized sequential segment at {curr_offset}")
 
     def read_entry_bytes(self, entry: BigArchiveEntry, decompress: bool = True) -> bytes:
         """Reads raw or decompressed bytes for a given entry."""
@@ -169,9 +172,20 @@ class BigArchive:
             read_size = entry.compressed_size if entry.compressed_size > 0 else (entry.size1 + entry.size2)
             raw = f.read(read_size)
 
-        if decompress and raw[:4] == b"sges":
-            return decompress_sges(raw)
+        if len(raw) != read_size:
+            raise ValueError(f"Incomplete archive entry: {entry.path}")
+        if decompress and entry.is_compressed:
+            if raw[:4] != b"sges":
+                raise ValueError(f"Missing SGES signature: {entry.path}")
+            return decompress_sges(raw, None if self.is_case_0 else (entry.size1, entry.size2))
         return raw
+
+    def reftexture_groups(self, entry):
+        if not self.is_case_0:
+            return ()
+        with self.path.open("rb") as source:
+            source.seek(entry.offset)
+            return sges_group_sizes(source.read(entry.compressed_size))
 
     def extract_entry(self, entry: BigArchiveEntry, output_path: Path | str, decompress: bool = True) -> Path:
         """Extracts a single entry to disk."""
@@ -192,7 +206,7 @@ class BigArchive:
         total = len(self.entries)
 
         for i, entry in enumerate(self.entries):
-            target_path = dest / entry.path
+            target_path = extraction_path(dest, entry.path)
             self.extract_entry(entry, target_path, decompress=decompress)
             if progress_cb:
                 progress_cb(i + 1, total, entry.path)
@@ -237,15 +251,16 @@ class BigArchive:
         if not target_entry:
             return False
 
+        if size1 is None:
+            size1 = len(new_data) - (size2 or 0)
+        if size2 is None:
+            size2 = len(new_data) - size1
+        if size1 < 0 or size2 < 0 or size1 + size2 != len(new_data):
+            raise ValueError("BIG block sizes must sum to the replacement length")
         target_entry.custom_data = new_data
-        if size1 is not None:
-            target_entry.size1 = size1
-        else:
-            target_entry.size1 = len(new_data)
-        if size2 is not None:
-            target_entry.size2 = size2
-        elif size1 is None:
-            target_entry.size2 = 0
+        target_entry.size1 = size1
+        target_entry.size2 = size2
+        target_entry.magic = new_data[:4]
         return True
 
     def repack(
@@ -259,89 +274,60 @@ class BigArchive:
         Repacks the archive to output_file with 16-byte alignment, sges chunking, and the entry table at EOF.
         """
         out_path = Path(output_file)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+        table_pos = self.total_file_size - self.table_offset
+        updates = []
+        with staged_output(out_path) as temp:
+            # Streaming archives can contain gigabytes of unindexed data.
+            # Keep every existing offset unless an indexed replacement must grow.
+            shutil.copyfile(self.path, temp)
+            with temp.open("r+b") as output:
+                for i, entry in enumerate(self.entries):
+                    data = entry.custom_data
+                    if data is not None:
+                        stored_size = self._stored_sizes[i]
+                        compressed = entry.is_compressed and (compress or self.is_case_0)
+                        if compressed:
+                            output.seek(entry.offset)
+                            template = output.read(stored_size)
+                            data = recompress_sges(data, template, entry.size1, self.is_case_0)
+                        offset = entry.offset
+                        if self.is_case_0:
+                            end = (self.entries[i+1].offset if i+1 < len(self.entries)
+                                   else self.total_file_size - self.table_offset)
+                            if len(data) > end - offset:
+                                raise ValueError(f"{entry.path} exceeds its streaming slot by {len(data) - (end - offset)} bytes")
+                        elif len(data) > stored_size:
+                            alignment = min(65536, offset & -offset) if offset else 65536
+                            offset = (table_pos + alignment - 1) & -alignment
+                            table_pos = (offset + len(data) + 15) & ~15
+                        output.seek(offset)
+                        output.write(data)
+                        if self.is_case_0 and len(data) < stored_size:
+                            output.write(bytes(stored_size - len(data)))
+                        updates.append((i, offset, len(data), compressed))
+                    if progress_cb:
+                        progress_cb(i + 1, len(self.entries), entry.path)
 
-        if backup_original and out_path.resolve() == self.path.resolve():
-            bak_path = self.path.with_suffix(".big.pc.bak")
-            if not bak_path.exists():
-                shutil.copy2(self.path, bak_path)
+                if updates and not self.is_case_0:
+                    output.seek(table_pos)
+                    output.write(struct.pack("<2I", 3, len(self.entries)))
+                    changed = {i: (off >> 4, size if comp else 0)
+                               for i, off, size, comp in updates}
+                    for i, entry in enumerate(self.entries):
+                        off, size = changed.get(i, (entry.offset_raw, entry.compressed_size))
+                        output.write(struct.pack("<5I", entry.hash, off, entry.size1, entry.size2, size))
+                    output.write(struct.pack("<I", self.table_offset))
+            backup_if_needed(self.path, out_path, backup_original)
 
-        temp_out = out_path.with_suffix(".tmp_big")
-        total = len(self.entries)
-        new_entries_table: list[tuple[int, int, int, int, int]] = []
-
-        with open(self.path, "rb") as f_in, open(temp_out, "wb") as f_out:
-            for i, entry in enumerate(self.entries):
-                # 16-byte align current file position
-                curr_pos = f_out.tell()
-                pad = (16 - (curr_pos % 16)) % 16
-                if pad:
-                    f_out.write(b"X" * pad)
-                    curr_pos += pad
-
-                offset_raw = curr_pos >> 4
-
-                if entry.custom_data is not None:
-                    # New / modified content
-                    data_to_write = entry.custom_data
-                    if compress and entry.is_compressed:
-                        data_to_write = compress_sges(data_to_write)
-                        comp_size = len(data_to_write)
-                        s1 = entry.size1 or len(entry.custom_data)
-                        s2 = entry.size2
-                    else:
-                        comp_size = 0
-                        if entry.size1 + entry.size2 == len(entry.custom_data):
-                            s1 = entry.size1
-                            s2 = entry.size2
-                        else:
-                            s1 = len(entry.custom_data)
-                            s2 = 0
-                else:
-                    # Stream directly from original file without re-compressing
-                    f_in.seek(entry.offset)
-                    orig_sz = entry.compressed_size if entry.compressed_size > 0 else (entry.size1 + entry.size2)
-                    data_to_write = f_in.read(orig_sz)
-                    comp_size = entry.compressed_size
-                    s1 = entry.size1
-                    s2 = entry.size2
-
-                f_out.write(data_to_write)
-                new_entries_table.append((entry.hash, offset_raw, s1, s2, comp_size))
-
-                # Update in-memory entry to match the new file exactly
-                entry.offset = offset_raw << 4
-                entry.compressed_size = comp_size
-                entry.size1 = s1
-                entry.size2 = s2
-                entry.custom_data = None
-
-                if progress_cb:
-                    progress_cb(i + 1, total, entry.path)
-
-            # 16-byte align before table
-            curr_pos = f_out.tell()
-            pad = (16 - (curr_pos % 16)) % 16
-            if pad:
-                f_out.write(b"X" * pad)
-
-            # Write Table at EOF
-            table_start = f_out.tell()
-            if not self.is_case_0:
-                f_out.write(struct.pack("<2I", 3, len(new_entries_table)))
-                for h, off_r, s1, s2, s3 in new_entries_table:
-                    f_out.write(struct.pack("<5I", h, off_r, s1, s2, s3))
-            else:
-                # Case 0: empty table
-                f_out.write(struct.pack("<2I", 3, 0))
-
-            # Table offset from EOF
-            table_size_bytes = f_out.tell() + 4 - table_start
-            f_out.write(struct.pack("<I", table_size_bytes))
-
-        # Atomic replace
-        if out_path.exists():
-            out_path.unlink()
-        temp_out.rename(out_path)
+        for i, offset, size, compressed in updates:
+            entry = self.entries[i]
+            entry.offset = offset
+            entry.offset_raw = offset >> 4
+            entry.compressed_size = size if compressed else 0
+            entry.is_compressed = compressed
+            entry.magic = entry.custom_data[:4]
+            entry.custom_data = None
+            self._stored_sizes[i] = size
+        self.total_file_size = table_pos + self.table_offset
         self.path = out_path
         return out_path

@@ -1,5 +1,7 @@
 from __future__ import annotations
 import struct
+from pathlib import Path
+import re
 from dataclasses import dataclass
 from typing import Optional
 from PIL import Image
@@ -53,7 +55,7 @@ class FaceTextureSet:
         self._parse()
 
     def _parse(self) -> None:
-        parsed_via_table = False
+        self.has_offset_table = False
         if len(self.raw_main) >= 8 and self.is_unique and not self.raw_main[:4].startswith(b"ptM"):
             try:
                 num_textures = struct.unpack("<I", self.raw_main[4:8])[0]
@@ -66,7 +68,7 @@ class FaceTextureSet:
                     tex_off, pad, tex_hash = struct.unpack("<3I", self.raw_main[rec_off : rec_off + 12])
                     offsets.append((tex_off, tex_hash))
 
-                if offsets and all(off < len(self.raw_vram) and self.raw_vram[off:off+4] == b"DDS " for off, _ in offsets):
+                if len(offsets) == num_textures and offsets and offsets == sorted(offsets) and all(off < len(self.raw_vram) and self.raw_vram[off:off+4] == b"DDS " for off, _ in offsets):
                     for i, (off, tex_hash) in enumerate(offsets):
                         end_off = offsets[i + 1][0] if i + 1 < len(offsets) else len(self.raw_vram)
                         dds_data = bytes(self.raw_vram[off:end_off])
@@ -84,16 +86,17 @@ class FaceTextureSet:
                         except Exception:
                             tex.image = None
                         self.textures.append(tex)
-                    parsed_via_table = True
+                    self.has_offset_table = True
             except Exception:
-                parsed_via_table = False
+                self.has_offset_table = False
 
-        if not parsed_via_table:
+        if not self.has_offset_table:
             # Fallback: slice all DDS from VRAM directly
             all_dds = extract_all_dds_from_vram(self.raw_vram)
             cur_off = 0
             for i, dds_data in enumerate(all_dds):
                 role = "Diffuse" if i == 0 else ("Normal" if i == 1 else ("Specular" if i == 2 else f"Tex {i}"))
+                cur_off = self.raw_vram.index(dds_data, cur_off)
                 tex = FaceSubTexture(
                     index=i,
                     hash=0,
@@ -114,32 +117,28 @@ class FaceTextureSet:
         if index < 0 or index >= len(self.textures):
             raise IndexError(f"Texture index {index} out of range (total {len(self.textures)})")
 
-        self.textures[index].dds_bytes = new_dds
-        self.textures[index].info = parse_dds_header(new_dds)
-        try:
-            self.textures[index].image = decode_dds_to_image(new_dds)
-        except Exception:
-            self.textures[index].image = None
-
-        new_vram = bytearray()
-        new_offsets: list[int] = []
-
-        for tex in self.textures:
-            pad = (16 - (len(new_vram) % 16)) % 16
-            if pad:
-                new_vram.extend(b"\x00" * pad)
-            new_offsets.append(len(new_vram))
-            new_vram.extend(tex.dds_bytes)
-
-        self.raw_vram = new_vram
-
-        # Update offsets in raw_main if present
-        if len(self.raw_main) >= 8:
-            for i, off in enumerate(new_offsets):
-                rec_off = 8 + i * 12
-                if rec_off + 4 <= len(self.raw_main):
-                    struct.pack_into("<I", self.raw_main, rec_off, off)
-                self.textures[i].offset_in_vram = off
+        info = parse_dds_header(new_dds)
+        if not info:
+            raise ValueError("Replacement is missing a valid DDS header")
+        image = decode_dds_to_image(new_dds)
+        image.load()
+        tex = self.textures[index]
+        start = tex.offset_in_vram
+        end = start + len(tex.dds_bytes)
+        if index + 1 < len(self.textures):
+            if self.has_offset_table:
+                new_dds += bytes(-len(new_dds) % 16)
+            elif len(new_dds) > end - start:
+                raise ValueError("Cannot move other textures without a recognized VRAM offset table")
+            else:
+                new_dds += bytes(end - start - len(new_dds))
+        self.raw_vram[start:end] = new_dds
+        tex.dds_bytes, tex.info, tex.image = new_dds, info, image
+        delta = len(new_dds) - (end - start)
+        if self.has_offset_table and delta:
+            for following in self.textures[index + 1:]:
+                following.offset_in_vram += delta
+                struct.pack_into("<I", self.raw_main, 8 + following.index * 12, following.offset_in_vram)
 
 
 class TRMContainer:
@@ -158,6 +157,8 @@ class TRMContainer:
             raise ValueError("Not a valid TRM container (magic mismatch)")
 
         magic, ver, s1, s2, null_val, num_files = struct.unpack("<4s5I", self.raw_data[:24])
+        if s1 + s2 > len(self.raw_data) or 24 + num_files * 12 > s1:
+            raise ValueError("Incomplete TRM data or subfile table")
         self.version = ver
         self.size1 = s1
         self.size2 = s2
@@ -172,6 +173,8 @@ class TRMContainer:
             else:
                 real_start = foff
 
+            if real_start + fsz > (s1 + s2 if is_vram else s1):
+                raise ValueError("TRM subfile extends beyond its section")
             sub_data = self.raw_data[real_start : real_start + fsz]
             self.subfiles.append(
                 TRMSubfile(
@@ -237,30 +240,15 @@ class TRMContainer:
 
         updated_entries: list[tuple[int, int, int]] = []
 
-        # Write Main subfiles first
         for sf in self.subfiles:
-            if not sf.is_vram:
-                pad = (16 - (len(main_payload) % 16)) % 16
-                if pad:
-                    main_payload.extend(b"\x00" * pad)
-                sf_offset = len(main_payload)
-                main_payload.extend(sf.data)
-                updated_entries.append((sf.hash, len(sf.data), sf_offset))
+            payload = vram_payload if sf.is_vram else main_payload
+            payload.extend(bytes(-len(payload) % 16))
+            offset = len(payload) | (sf.offset_raw & 0xf)
+            updated_entries.append((sf.hash, len(sf.data), offset))
+            payload.extend(sf.data)
 
-        pad_b1 = (16 - (len(main_payload) % 16)) % 16
-        if pad_b1:
-            main_payload.extend(b"\x00" * pad_b1)
+        main_payload.extend(bytes(-len(main_payload) % 16))
         new_size1 = len(main_payload)
-
-        # Write VRAM subfiles
-        for sf in self.subfiles:
-            if sf.is_vram:
-                pad = (16 - (len(vram_payload) % 16)) % 16
-                if pad:
-                    vram_payload.extend(b"\x00" * pad)
-                vram_off_relative = len(vram_payload) | 0x1
-                vram_payload.extend(sf.data)
-                updated_entries.append((sf.hash, len(sf.data), vram_off_relative))
 
         pad_b2 = (16 - (len(vram_payload) % 16)) % 16
         if pad_b2:
@@ -273,7 +261,7 @@ class TRMContainer:
             self.version,
             new_size1,
             new_size2,
-            0,
+            struct.unpack_from("<I", self.raw_data, 16)[0],
             len(self.subfiles),
         )
 
@@ -286,3 +274,51 @@ class TRMContainer:
 
         total_bytes = bytes(main_payload) + bytes(vram_payload)
         return total_bytes, new_size1, new_size2
+
+
+def import_head_textures(archive, folder: Path, progress=None):
+    heads = {Path(e.path).stem.lower(): e for e in archive.entries if "_head" in e.path.lower()}
+    slots = {}
+    for path in sorted(folder.rglob("*")):
+        if path.suffix.lower() not in {".png", ".dds", ".jpg", ".tga"} or not path.is_file():
+            continue
+        name = path.stem.lower()
+        stem = path.parent.name.lower()
+        if stem not in heads:
+            candidates = [key for key in heads if key == name or name.startswith(key + "_")]
+            if not candidates:
+                continue
+            stem = max(candidates, key=len)
+        role = re.search(r"(?:^|_)(normal|specular|spec)(?:_|$)", name.removeprefix(stem))
+        slot = (1 if role[1] == "normal" else 2) if role else 0
+        textures = slots.setdefault(stem, {})
+        if slot in textures:
+            raise ValueError(f"Both {textures[slot].name} and {path.name} target {stem} slot {slot}")
+        textures[slot] = path
+
+    updates = []
+    for i, (stem, textures) in enumerate(slots.items(), 1):
+        entry = heads[stem]
+        if progress:
+            progress(i, len(slots), entry.path)
+        model = TRMContainer(archive.read_entry_bytes(entry))
+        face_set = model.get_face_texture_set()
+        if not face_set:
+            raise ValueError(f"{entry.path} has no face texture set")
+        for index, path in textures.items():
+            if path.suffix.lower() == ".dds":
+                dds = path.read_bytes()
+            else:
+                with Image.open(path) as image:
+                    fourcc = face_set.textures[index].info["fourcc"]
+                    dds = encode_image_to_dds(image, fourcc)
+            face_set.replace_texture(index, dds)
+        model.apply_face_texture_set(face_set)
+        updates.append((entry, model.build()))
+
+    for entry, (data, size1, size2) in updates:
+        if hasattr(entry, "size1"):
+            archive.replace_entry(entry.hash, data, size1=size1, size2=size2)
+        else:
+            archive.replace_entry(entry.hash, data)
+    return len(updates)

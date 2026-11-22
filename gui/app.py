@@ -1,6 +1,5 @@
 from __future__ import annotations
-import os
-import sys
+import struct
 import threading
 from pathlib import Path
 from typing import Optional
@@ -8,18 +7,19 @@ from typing import Optional
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import ttkbootstrap as tb
-from ttkbootstrap.constants import *
+from tkinter.constants import (BOTH, BOTTOM, CENTER, DISABLED, E, END, HORIZONTAL, LEFT,
+                               NORMAL, RIGHT, TOP, VERTICAL, W, X, Y)
 from PIL import Image, ImageTk
 
-# Ensure core is importable
-toolkit_dir = Path(__file__).resolve().parent.parent
-if str(toolkit_dir) not in sys.path:
-    sys.path.insert(0, str(toolkit_dir))
+if __name__ == "__main__" and not __package__:
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from core import open_archive
 from core.archive_big import BigArchive, BigArchiveEntry
-from core.archive_wad import WadArchive
+from core.archive_wad import WadArchive, WadArchiveEntry
 from core.hash_db import HashDatabase
-from core.trm_processor import TRMContainer, FaceTextureSet
+from core.trm_processor import TRMContainer, FaceTextureSet, import_head_textures
 from core.dds_utils import (
     decode_dds_to_image,
     encode_image_to_dds,
@@ -38,9 +38,8 @@ from core.dgad_video import (
 )
 from core.config import (
     load_config,
-    save_config,
     get_ffmpeg_path,
-    set_ffmpeg_path,
+    save_config,
     detect_all_ffmpeg_candidates,
     get_config_value,
     set_config_value,
@@ -58,13 +57,13 @@ class LANoireToolkitApp(tb.Window):
 
         self.hash_db = HashDatabase.get_instance()
         self.archive: Optional[BigArchive | WadArchive] = None
-        self.current_entry: Optional[BigArchiveEntry] = None
+        self.current_entry: Optional[BigArchiveEntry | WadArchiveEntry] = None
 
         # Texture state for currently inspected entry
         self.current_trm: Optional[TRMContainer] = None
         self.current_face_set: Optional[FaceTextureSet] = None
         self.current_standalone_dds: Optional[bytes] = None
-        self.current_ref_footer: Optional[bytes] = None
+        self.current_ref_layout = None
         self.active_dds_bytes: Optional[bytes] = None
         self.active_image: Optional[Image.Image] = None
         self.preview_image_ref: Optional[ImageTk.PhotoImage] = None
@@ -75,7 +74,10 @@ class LANoireToolkitApp(tb.Window):
 
         self.filtered_entries: list[BigArchiveEntry] = []
 
+        self.busy = False
         self._build_ui()
+        self._clear_inspector()
+        self.protocol("WM_DELETE_WINDOW", self._close)
 
     def _build_ui(self):
         # Row 1: Operations Toolbar
@@ -107,10 +109,11 @@ class LANoireToolkitApp(tb.Window):
         )
         self.btn_repack.pack(side=LEFT, padx=3)
 
-        tb.Separator(toolbar, orient=VERTICAL).pack(side=LEFT, padx=6, fill=Y)
+        batchbar = tb.Frame(self, padding=(8, 0))
+        batchbar.pack(fill=X, side=TOP)
 
         self.btn_batch_export_video = tb.Button(
-            toolbar,
+            batchbar,
             text="Batch Export Videos...",
             bootstyle="outline-warning",
             state=DISABLED,
@@ -119,7 +122,7 @@ class LANoireToolkitApp(tb.Window):
         self.btn_batch_export_video.pack(side=LEFT, padx=3)
 
         self.btn_batch_import_video = tb.Button(
-            toolbar,
+            batchbar,
             text="Batch Import Videos...",
             bootstyle="outline-success",
             state=DISABLED,
@@ -127,10 +130,10 @@ class LANoireToolkitApp(tb.Window):
         )
         self.btn_batch_import_video.pack(side=LEFT, padx=3)
 
-        tb.Separator(toolbar, orient=VERTICAL).pack(side=LEFT, padx=6, fill=Y)
+        tb.Separator(batchbar, orient=VERTICAL).pack(side=LEFT, padx=6, fill=Y)
 
         self.btn_batch_inject = tb.Button(
-            toolbar,
+            batchbar,
             text="Batch Textures (Heads)...",
             bootstyle="outline-primary",
             state=DISABLED,
@@ -158,7 +161,7 @@ class LANoireToolkitApp(tb.Window):
 
         tb.Button(
             filter_bar,
-            text="X",
+            text="\u00d7",
             bootstyle="secondary-outline",
             width=2,
             command=self._clear_search,
@@ -248,16 +251,15 @@ class LANoireToolkitApp(tb.Window):
         # Row 1: Selected entry actions
         actions_r1 = tb.Frame(tree_actions)
         actions_r1.pack(fill=X, side=TOP, pady=(0, 3))
-        tb.Button(actions_r1, text="Export PNG", bootstyle="outline-success", command=self._on_export_active_as_png).pack(side=LEFT, padx=2)
-        tb.Button(actions_r1, text="Export DDS", bootstyle="outline-info", command=self._on_export_active_as_dds).pack(side=LEFT, padx=2)
-        tb.Button(actions_r1, text="Export Video", bootstyle="outline-warning", command=lambda: self._on_export_active_face_video("mp4")).pack(side=LEFT, padx=2)
-        tb.Button(actions_r1, text="Extract Raw", bootstyle="outline-secondary", command=self._on_extract_selected).pack(side=LEFT, padx=2)
+        self.btn_extract = tb.Button(actions_r1, text="Extract Entry...", bootstyle="outline-secondary",
+                                     command=self._on_extract_selected)
+        self.btn_extract.pack(side=LEFT, padx=2)
 
         # Row 2: Bulk extraction actions
         actions_r2 = tb.Frame(tree_actions)
         actions_r2.pack(fill=X, side=TOP)
-        tb.Button(actions_r2, text="Extract All Files...", bootstyle="outline-dark", command=self._on_extract_all).pack(side=LEFT, padx=2)
-        tb.Button(actions_r2, text="Extract All Faces (PNG)...", bootstyle="outline-warning", command=self._on_extract_all_faces).pack(side=LEFT, padx=2)
+        tb.Button(actions_r2, text="Extract All Files...", bootstyle="outline-secondary", command=self._on_extract_all).pack(side=LEFT, padx=2)
+        tb.Button(actions_r2, text="Extract All Faces...", bootstyle="outline-warning", command=self._on_extract_all_faces).pack(side=LEFT, padx=2)
 
         # Right: Inspector & Preview
         right_frame = tb.Frame(main_paned, padding=8)
@@ -371,6 +373,7 @@ class LANoireToolkitApp(tb.Window):
         hex_scroll_y.config(command=self.hex_text.yview)
         hex_scroll_x.config(command=self.hex_text.xview)
         self.hex_text.pack(side=LEFT, fill=BOTH, expand=True)
+        self.tex_info_label.bind("<Configure>", lambda e: self.tex_info_label.config(wraplength=max(1, e.width - 8)))
 
     def _clear_search(self):
         self.search_var.set("")
@@ -379,8 +382,7 @@ class LANoireToolkitApp(tb.Window):
         """Displays the settings dialog to configure tool paths and options."""
         dialog = tb.Toplevel(self)
         dialog.title("Toolkit Settings")
-        dialog.geometry("620x400")
-        dialog.resizable(False, False)
+        dialog.minsize(540, 0)
         dialog.transient(self)
         dialog.grab_set()
 
@@ -468,16 +470,13 @@ class LANoireToolkitApp(tb.Window):
         def save_and_close():
             new_ff = ff_entry_var.get().strip()
             new_game = game_entry_var.get().strip()
-            if new_ff:
-                if not Path(new_ff).is_file():
-                    messagebox.showerror("Invalid Path", f"FFmpeg executable not found at:\n{new_ff}", parent=dialog)
-                    return
-                set_ffmpeg_path(new_ff)
-            else:
-                set_config_value("ffmpeg_path", "")
-
-            if new_game:
-                set_config_value("game_path", new_game)
+            if new_ff and not Path(new_ff).is_file():
+                messagebox.showerror("Invalid Path", f"FFmpeg executable not found at:\n{new_ff}", parent=dialog)
+                return
+            cfg.update(ffmpeg_path=new_ff, game_path=new_game)
+            if not save_config(cfg):
+                messagebox.showerror("Settings", "Could not write the configuration file.", parent=dialog)
+                return
 
             dialog.destroy()
             messagebox.showinfo("Settings Saved", "Configuration saved successfully.")
@@ -497,16 +496,19 @@ class LANoireToolkitApp(tb.Window):
         if path:
             p = Path(path)
             set_config_value("last_open_dir", str(p.parent))
-            self.load_archive(p)
+            if self._confirm_discard():
+                self.load_archive(p)
 
     def load_archive(self, path: Path):
         self.status_label.config(text=f"Loading {path.name}...")
         self.update_idletasks()
 
-        if path.name.endswith(".wad.pc"):
-            self.archive = WadArchive(path)
-        else:
-            self.archive = BigArchive(path)
+        try:
+            self.archive = open_archive(path)
+        except (OSError, ValueError, struct.error) as err:
+            self.status_label.config(text=f"Could not open {path.name}")
+            messagebox.showerror("Open Archive", str(err), parent=self)
+            return
 
         self.btn_repack.config(state=NORMAL)
         self.btn_deploy.config(state=NORMAL)
@@ -516,6 +518,33 @@ class LANoireToolkitApp(tb.Window):
         self._apply_filter()
         self.status_label.config(text=f"Loaded {path.name} ({len(self.archive.entries)} entries).")
 
+    def _confirm_discard(self):
+        return (not self.archive or not any(e.custom_data is not None for e in self.archive.entries)
+                or messagebox.askyesno("Unsaved edits", "Discard unsaved archive edits?", parent=self))
+
+    def _close(self):
+        if not self.busy and self._confirm_discard():
+            self.destroy()
+
+    def _clear_inspector(self):
+        self.current_entry = self.current_face_set = self.current_trm = None
+        self.active_dds_bytes = self.active_image = self.preview_image_ref = None
+        self.current_ref_layout = self.current_standalone_dds = None
+        self.current_dgad_raw = self.current_dgad_info = None
+        self.hex_text.config(state=NORMAL)
+        self.hex_text.delete("1.0", END)
+        self.hex_text.config(state=DISABLED)
+        self.image_label.config(image="", text="")
+        self.tex_info_label.config(text="Select an entry to preview.")
+        self.subtex_frame.pack_forget()
+        for button in (self.btn_export_video_mp4, self.btn_export_video_ogv,
+                       self.btn_inject_video, self.btn_configure_ffmpeg):
+            button.pack_forget()
+        for button, side in ((self.btn_export_png, LEFT), (self.btn_export_dds, LEFT), (self.btn_replace_tex, RIGHT)):
+            button.pack(side=side, padx=3)
+            button.config(state=DISABLED)
+        self.btn_extract.config(state=DISABLED)
+
     def _apply_filter(self):
         if not self.archive:
             self.count_label.config(text="No archive loaded")
@@ -524,6 +553,7 @@ class LANoireToolkitApp(tb.Window):
         query = self.search_var.get().lower().strip()
         cat = self.filter_category.get()
 
+        self._clear_inspector()
         self.tree.delete(*self.tree.get_children())
         self.filtered_entries.clear()
 
@@ -563,7 +593,9 @@ class LANoireToolkitApp(tb.Window):
 
             self.filtered_entries.append(entry)
 
-            sz = entry.size if hasattr(entry, "size") else (entry.size1 + entry.size2)
+            sz = len(entry.custom_data) if entry.custom_data is not None else (
+                entry.size if isinstance(entry, WadArchiveEntry) else entry.size1 + entry.size2 or entry.compressed_size
+            )
             self.tree.insert("", END, values=(path_str, f"{sz:,}", fmt_lbl, h_str))
 
         self.count_label.config(text=f"Showing {len(self.filtered_entries):,} of {total_entries:,} entries")
@@ -578,27 +610,36 @@ class LANoireToolkitApp(tb.Window):
     def _on_tree_select(self, event):
         sel = self.tree.selection()
         if not sel:
+            self._clear_inspector()
             return
         item_idx = self.tree.index(sel[0])
         if item_idx >= len(self.filtered_entries):
             return
 
         self.current_entry = self.filtered_entries[item_idx]
-        self._inspect_entry(self.current_entry)
+        try:
+            self._inspect_entry(self.current_entry)
+        except Exception as err:
+            self._clear_inspector()
+            messagebox.showerror("Inspect Entry", str(err), parent=self)
 
     def _inspect_entry(self, entry: BigArchiveEntry):
-        raw_data = self.archive.read_entry_bytes(entry, decompress=True)
+        raw_data = self.archive.read_entry_bytes(entry)
 
         # Update Hex tab
+        self.btn_extract.config(state=NORMAL)
+        self.hex_text.config(state=NORMAL)
         hex_preview = self._format_hex(raw_data[:1024])
         self.hex_text.delete("1.0", END)
         self.hex_text.insert(END, f"File: {entry.path}\nHash: 0x{entry.hash:08x}\nSize: {len(raw_data):,} bytes\n\n{hex_preview}")
+
+        self.hex_text.config(state=DISABLED)
 
         # Reset texture & video states
         self.current_face_set = None
         self.current_trm = None
         self.current_standalone_dds = None
-        self.current_ref_footer = None
+        self.current_ref_layout = None
         self.active_dds_bytes = None
         self.active_image = None
         self.current_dgad_raw = None
@@ -638,10 +679,11 @@ class LANoireToolkitApp(tb.Window):
 
         # Case 3: Raw reftexture segment
         if not has_texture:
-            wrapped_dds, footer = wrap_raw_dxt_to_dds(raw_data)
+            groups = self.archive.reftexture_groups(entry) if isinstance(self.archive, BigArchive) else ()
+            wrapped_dds, footer = wrap_raw_dxt_to_dds(raw_data, groups)
             if wrapped_dds:
                 self.current_standalone_dds = wrapped_dds
-                self.current_ref_footer = footer
+                self.current_ref_layout = footer
                 self.active_dds_bytes = wrapped_dds
                 try:
                     self.active_image = decode_dds_to_image(wrapped_dds)
@@ -677,7 +719,7 @@ class LANoireToolkitApp(tb.Window):
                 dur = len(dgad.frames) / (dgad.fps or 30)
                 self.tex_info_label.config(
                     text=f"MotionScan Face Video | {dgad.resolution}x{dgad.resolution} @ {dgad.fps} FPS | "
-                         f"Frames: {len(dgad.frames)} ({dur:.2f}s) | Normals: {dgad.macroblock_scale*2}x{dgad.macroblock_scale*2} | "
+                         f"Frames: {len(dgad.frames)} ({dur:.2f}s) | Normals: {dgad.normal_resolution}x{dgad.normal_resolution} | "
                          f"Size: {len(raw_data):,} bytes"
                 )
             except Exception as e:
@@ -699,8 +741,8 @@ class LANoireToolkitApp(tb.Window):
                 self.btn_inject_video.config(state=NORMAL)
             else:
                 self.btn_export_video_mp4.pack_forget()
-                self.btn_export_video_ogv.pack_forget()
-                self.btn_inject_video.pack_forget()
+                self.btn_export_video_ogv.pack(side=LEFT, padx=3)
+                self.btn_inject_video.pack(side=RIGHT, padx=3)
                 self.btn_configure_ffmpeg.pack(side=LEFT, padx=3)
         elif has_texture:
             self.notebook.select(self.tab_texture)
@@ -716,6 +758,7 @@ class LANoireToolkitApp(tb.Window):
             self.btn_export_dds.config(state=NORMAL)
             self.btn_replace_tex.config(state=NORMAL)
         else:
+            self.notebook.select(self.tab_hex)
             self.subtex_frame.pack_forget()
             self.image_label.config(image="", text="No image or texture found in this chunk.")
             self.preview_image_ref = None
@@ -741,7 +784,7 @@ class LANoireToolkitApp(tb.Window):
             self.subtex_frame.pack_forget()
             return
 
-        self.subtex_frame.pack(fill=X, side=TOP, pady=(0, 6))
+        self.subtex_frame.pack(fill=X, side=TOP, pady=(0, 6), before=self.image_canvas_frame)
         self.selected_subtex_var.set(0)
 
         for i, tex in enumerate(self.current_face_set.textures):
@@ -852,9 +895,15 @@ class LANoireToolkitApp(tb.Window):
         except Exception as e:
             messagebox.showerror("Export Failed", f"Failed to save DDS file:\n{e}")
 
+    def _replace_model(self, entry, data, size1, size2):
+        if isinstance(self.archive, BigArchive):
+            self.archive.replace_entry(entry.hash, data, size1=size1, size2=size2)
+        else:
+            self.archive.replace_entry(entry.hash, data)
+
     def _on_inject_upscaled_texture(self):
         """Prompts for an edited PNG or DDS and injects it into the active slot/entry."""
-        if not self.current_entry or not self.archive:
+        if not self.current_entry or not self.archive or not self.active_dds_bytes:
             messagebox.showinfo("Select Entry", "Please select a texture entry first.")
             return
 
@@ -875,6 +924,7 @@ class LANoireToolkitApp(tb.Window):
             # 1. Determine DDS bytes
             if img_path.suffix.lower() == ".dds":
                 new_dds_bytes = img_path.read_bytes()
+                decode_dds_to_image(new_dds_bytes).load()
             else:
                 pil_img = Image.open(img_path)
                 # Determine compression based on slot or current info
@@ -890,11 +940,11 @@ class LANoireToolkitApp(tb.Window):
                 self.current_face_set.replace_texture(idx, new_dds_bytes)
                 self.current_trm.apply_face_texture_set(self.current_face_set)
                 new_trm_bytes, new_s1, new_s2 = self.current_trm.build()
-                self.archive.replace_entry(self.current_entry.hash, new_trm_bytes, size1=new_s1, size2=new_s2)
+                self._replace_model(self.current_entry, new_trm_bytes, new_s1, new_s2)
                 self._inspect_entry(self.current_entry)
-            elif self.current_ref_footer is not None:
+            elif self.current_ref_layout is not None:
                 # Raw reftexture segment
-                raw_payload = unwrap_dds_to_raw_dxt(new_dds_bytes, self.current_ref_footer)
+                raw_payload = unwrap_dds_to_raw_dxt(new_dds_bytes, self.current_ref_layout)
                 self.archive.replace_entry(self.current_entry.hash, raw_payload)
                 self._inspect_entry(self.current_entry)
             else:
@@ -905,7 +955,7 @@ class LANoireToolkitApp(tb.Window):
             messagebox.showinfo(
                 "Texture Injected",
                 f"Successfully injected texture from {img_path.name}!\n\n"
-                "Click 'Repack Archive' or 'Deploy to Game' to save changes to .pc.",
+                "Click 'Repack as New' or 'Save (In-Place .bak)' to save changes to .pc.",
             )
         except Exception as e:
             messagebox.showerror("Injection Error", f"Failed to inject texture:\n{e}")
@@ -971,7 +1021,7 @@ class LANoireToolkitApp(tb.Window):
             messagebox.showinfo(
                 "Video Injected",
                 f"Successfully injected {Path(path).name} into {self.current_entry.path}!\n\n"
-                "Click 'Repack Archive' or 'Deploy to Game' to save your changes to the .pc file.",
+                "Click 'Repack as New' or 'Save (In-Place .bak)' to save your changes to the .pc file.",
             )
         except Exception as e:
             messagebox.showerror("Injection Failed", f"Failed to inject video:\n{e}")
@@ -994,14 +1044,14 @@ class LANoireToolkitApp(tb.Window):
                     self.archive,
                     dest_dir,
                     character_filter=char_filter,
-                    export_format="mp4",
+                    export_format="mp4" if find_ffmpeg() else "ogv",
                     progress_cb=lambda cur, tot, name: self._update_progress(
                         cur, tot, f"Exporting video: {name} ({cur}/{tot})"
                     ),
                 )
                 self.after(0, lambda: messagebox.showinfo(
                     "Batch Export Complete",
-                    f"Successfully exported {count} face video(s) to:\n{dest_dir}\n\nA manifest.json was generated for auto-reimporting.",
+                    f"Exported {count} face video(s) to:\n{dest_dir}" if count else "No matching videos were found.",
                 ))
             except Exception as e:
                 self.after(0, lambda err=e: messagebox.showerror("Export Failed", f"Error during batch export:\n{err}"))
@@ -1010,7 +1060,7 @@ class LANoireToolkitApp(tb.Window):
 
         self.progress_bar.config(mode="determinate", value=0)
         self.status_label.config(text="Exporting face videos...")
-        threading.Thread(target=run_export, daemon=True).start()
+        self._start_job(run_export)
 
     def _on_batch_import_face_videos(self):
         """Scans a folder of upscaled video files (.mp4/.ogv) and injects them into the archive."""
@@ -1036,7 +1086,7 @@ class LANoireToolkitApp(tb.Window):
                     self.after(0, lambda: messagebox.showinfo(
                         "Batch Import Complete",
                         f"Successfully injected {len(injected)} face video(s) into memory!\n\n"
-                        "Click 'Repack Archive' or 'Deploy to Game' to write changes to disk.",
+                        "Click 'Repack as New' or 'Save (In-Place .bak)' to write changes to disk.",
                     ))
                     if self.current_entry:
                         self.after(0, lambda: self._inspect_entry(self.current_entry))
@@ -1052,7 +1102,7 @@ class LANoireToolkitApp(tb.Window):
 
         self.progress_bar.config(mode="determinate", value=0)
         self.status_label.config(text="Scanning and importing face videos...")
-        threading.Thread(target=run_import, daemon=True).start()
+        self._start_job(run_import)
 
     def _on_extract_selected(self):
         """Extracts the raw file entry (.chunk / .sges / .bin)."""
@@ -1086,7 +1136,7 @@ class LANoireToolkitApp(tb.Window):
             self.after(0, lambda: messagebox.showinfo("Completed", f"Extracted all {total} files to {dest}."))
             self.after(0, lambda: self.status_label.config(text="Extraction finished."))
 
-        threading.Thread(target=task, daemon=True).start()
+        self._start_job(task)
 
     def _on_extract_all_faces(self):
         if not self.archive:
@@ -1110,7 +1160,7 @@ class LANoireToolkitApp(tb.Window):
 
             for i, entry in enumerate(head_entries):
                 try:
-                    raw_trm = self.archive.read_entry_bytes(entry, decompress=True)
+                    raw_trm = self.archive.read_entry_bytes(entry)
                     if raw_trm[:4] == b"trM#":
                         trm = TRMContainer(raw_trm)
                         face_set = trm.get_face_texture_set()
@@ -1128,17 +1178,16 @@ class LANoireToolkitApp(tb.Window):
                                 if tex.dds_bytes:
                                     (char_dir / f"{stem}_{role}_{w}x{h}_{fourcc}.dds").write_bytes(tex.dds_bytes)
                             extracted += 1
-                except Exception:
-                    pass
+                except Exception as err:
+                    raise ValueError(f"Could not extract {entry.path}: {err}") from err
                 self._update_progress(i + 1, total, f"Extracting faces: {i + 1}/{total}...")
 
             self.after(0, lambda: messagebox.showinfo("Extraction Complete", f"Successfully extracted face textures for {extracted} characters to:\n{dest_dir}"))
             self.after(0, lambda: self.status_label.config(text=f"Extracted {extracted} character face texture sets."))
 
-        threading.Thread(target=task, daemon=True).start()
+        self._start_job(task)
 
     def _on_batch_inject_folder(self):
-        import re
         if not self.archive:
             return
 
@@ -1149,89 +1198,10 @@ class LANoireToolkitApp(tb.Window):
         batch_dir = Path(batch_dir_str)
 
         def task():
-            head_map = {}
-            for entry in self.archive.entries:
-                p_str = entry.name if hasattr(entry, "name") else entry.path
-                if "_head" in p_str.lower():
-                    stem = Path(p_str).stem.lower()
-                    head_map[stem] = entry
-
-            image_exts = {".png", ".dds", ".jpg", ".tga"}
-            image_files = [f for f in batch_dir.rglob("*") if f.suffix.lower() in image_exts]
-            if not image_files:
-                self.after(0, lambda: messagebox.showinfo("No Images Found", f"No supported image files (.png, .dds) found in {batch_dir}."))
+            applied = import_head_textures(self.archive, batch_dir, self._update_progress)
+            if not applied:
+                self.after(0, lambda: messagebox.showinfo("No Matches", "No matching head textures were found."))
                 return
-
-            updates_by_entry = {}
-            for img_file in image_files:
-                filename = img_file.stem.lower()
-                if "normal" in filename:
-                    slot_idx = 1
-                    fourcc = "DXT5"
-                elif "specular" in filename or "spec" in filename:
-                    slot_idx = 2
-                    fourcc = "DXT1"
-                else:
-                    slot_idx = 0
-                    fourcc = "DXT1"
-
-                parent_stem = img_file.parent.name.lower()
-                matched_stem = None
-                if parent_stem in head_map:
-                    matched_stem = parent_stem
-                else:
-                    clean_name = filename
-                    for tag in ["_diffuse", "_normal", "_specular", "_spec", "_dxt1", "_dxt5", "_raw"]:
-                        clean_name = clean_name.replace(tag, "")
-                    clean_name = re.sub(r"_\d+x\d+", "", clean_name)
-                    if clean_name in head_map:
-                        matched_stem = clean_name
-                    else:
-                        for stem in head_map:
-                            if stem in filename or clean_name in stem:
-                                matched_stem = stem
-                                break
-
-                if not matched_stem:
-                    continue
-
-                entry = head_map[matched_stem]
-                if entry.hash not in updates_by_entry:
-                    updates_by_entry[entry.hash] = {"entry": entry, "slots": {}}
-                updates_by_entry[entry.hash]["slots"][slot_idx] = (img_file, fourcc)
-
-            total = len(updates_by_entry)
-            if total == 0:
-                self.after(0, lambda: messagebox.showinfo("No Matches", "Could not match any images in the folder to character heads in this archive."))
-                return
-
-            self.after(0, lambda: self.progress_bar.config(maximum=total, value=0))
-            applied = 0
-
-            for i, (entry_hash, update_info) in enumerate(updates_by_entry.items()):
-                entry = update_info["entry"]
-                slots = update_info["slots"]
-                try:
-                    raw_data = self.archive.read_entry_bytes(entry, decompress=True)
-                    if raw_data[:4] == b"trM#":
-                        trm = TRMContainer(raw_data)
-                        face_set = trm.get_face_texture_set()
-                        if face_set:
-                            for slot_idx, (img_path, fourcc) in slots.items():
-                                if img_path.suffix.lower() == ".dds":
-                                    new_dds = img_path.read_bytes()
-                                else:
-                                    pil_img = Image.open(img_path)
-                                    new_dds = encode_image_to_dds(pil_img, fourcc=fourcc, generate_mips=True)
-                                face_set.replace_texture(slot_idx, new_dds)
-
-                            trm.apply_face_texture_set(face_set)
-                            new_trm, s1, s2 = trm.build()
-                            self.archive.replace_entry(entry.hash, new_trm, size1=s1, size2=s2)
-                            applied += 1
-                except Exception:
-                    pass
-                self._update_progress(i + 1, total, f"Injecting textures: {i + 1}/{total}...")
 
             if self.current_entry:
                 self.after(0, lambda: self._inspect_entry(self.current_entry))
@@ -1239,11 +1209,11 @@ class LANoireToolkitApp(tb.Window):
             self.after(0, lambda: messagebox.showinfo(
                 "Batch Injection Complete",
                 f"Successfully injected textures into {applied} character heads in memory!\n\n"
-                "Click 'Repack Archive' or 'Deploy to Game' to save to the .pc file.",
+                "Click 'Repack as New' or 'Save (In-Place .bak)' to save to the .pc file.",
             ))
             self.after(0, lambda: self.status_label.config(text=f"Batch injected {applied} character head textures."))
 
-        threading.Thread(target=task, daemon=True).start()
+        self._start_job(task)
 
     def _on_repack_archive(self):
         if not self.archive:
@@ -1251,7 +1221,7 @@ class LANoireToolkitApp(tb.Window):
 
         dest = filedialog.asksaveasfilename(
             title="Save Repacked Archive",
-            defaultextension=".big.pc",
+            defaultextension=".wad.pc" if isinstance(self.archive, WadArchive) else ".big.pc",
             initialfile=self.archive.path.name,
             filetypes=[("Archive (*.pc)", "*.pc"), ("All Files (*.*)", "*.*")],
         )
@@ -1280,7 +1250,6 @@ class LANoireToolkitApp(tb.Window):
             try:
                 self.archive.repack(
                     dest_path,
-                    compress=True,
                     backup_original=True,
                     progress_cb=lambda i, tot, name: self._update_progress(i, tot, f"Repacking entry {i}/{tot}..."),
                 )
@@ -1288,12 +1257,32 @@ class LANoireToolkitApp(tb.Window):
                 self.after(0, lambda: messagebox.showinfo("Repack Complete", f"Successfully repacked to:\n{dest_path}"))
                 self.after(0, lambda: self.status_label.config(text=f"Repacked {dest_path.name} successfully."))
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Repack Error", f"Error during repacking:\n{e}"))
+                self.after(0, lambda err=e: messagebox.showerror("Repack Error", f"Error during repacking:\n{err}"))
 
-        threading.Thread(target=task, daemon=True).start()
+        self._start_job(task)
+
+    def _start_job(self, work):
+        if self.busy:
+            return
+        self.busy = True
+        self.attributes("-disabled", True)
+
+        def finish():
+            self.attributes("-disabled", False)
+            self.busy = False
+
+        def run():
+            try:
+                work()
+            except Exception as err:
+                self.after(0, lambda msg=str(err): messagebox.showerror("Archive operation failed", msg))
+            finally:
+                self.after(0, finish)
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _update_progress(self, current: int, total: int, text: str):
-        self.after(0, lambda: (self.progress_bar.config(value=current), self.status_label.config(text=text)))
+        self.after(0, lambda: (self.progress_bar.config(value=current, maximum=total), self.status_label.config(text=text)))
 
     @staticmethod
     def _format_hex(data: bytes, width: int = 16) -> str:

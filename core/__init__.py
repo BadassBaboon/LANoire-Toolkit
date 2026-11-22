@@ -4,6 +4,8 @@ Supports reading, unpacking, editing, and repacking .big.pc and .wad.pc archives
 TRM models, UniqueTextureVRAM face textures, and SGES deflate chunks.
 """
 
+from pathlib import Path
+
 from .hash_db import HashDatabase
 from .sges import decompress_sges, compress_sges
 from .dds_utils import (
@@ -14,7 +16,7 @@ from .dds_utils import (
 )
 from .trm_processor import TRMContainer, TRMSubfile, FaceTextureSet
 from .archive_big import BigArchive, BigArchiveEntry
-from .archive_wad import WadArchive, WadArchiveEntry
+from .archive_wad import WAD_MAGIC, WadArchive, WadArchiveEntry
 from .config import (
     load_config,
     save_config,
@@ -25,7 +27,15 @@ from .config import (
     detect_all_ffmpeg_candidates,
 )
 
+def open_archive(path: Path | str) -> BigArchive | WadArchive:
+    path = Path(path)
+    with path.open("rb") as source:
+        is_wad = source.read(4) == WAD_MAGIC
+    return WadArchive(path) if is_wad else BigArchive(path)
+
+
 __all__ = [
+    "open_archive",
     "HashDatabase",
     "decompress_sges",
     "compress_sges",

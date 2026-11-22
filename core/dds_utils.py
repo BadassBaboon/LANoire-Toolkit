@@ -1,29 +1,19 @@
 from __future__ import annotations
 import io
 import struct
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any
 from PIL import Image
 
 DDS_MAGIC = b"DDS "
 
-# Known raw reftexture segment sizes: {total_size: (w, h, fourcc, mips, payload_size)}
-REF_TEXTURE_SIZES: dict[int, tuple[int, int, str, int, int]] = {
-    1398128: (1024, 1024, "DXT5", 11, 1398096),
-    349552:  (512, 512, "DXT5", 10, 349520),
-    174800:  (512, 512, "DXT1", 10, 174768),
-    87408:   (256, 256, "DXT5", 9, 87376),
-    43728:   (256, 256, "DXT1", 9, 43696),
-    43704:   (256, 256, "DXT1", 9, 43690),
-    21872:   (128, 128, "DXT5", 8, 21840),
-    10960:   (128, 128, "DXT1", 8, 10928),
-    5520:    (64, 64, "DXT5", 7, 5488),
-    5488:    (64, 64, "DXT5", 7, 5488),
-    2768:    (64, 64, "DXT1", 7, 2752),
-    1424:    (32, 32, "DXT5", 6, 1392),
-    1392:    (32, 32, "DXT5", 6, 1392),
-    720:     (32, 32, "DXT1", 6, 704),
-    696:     (32, 32, "DXT1", 6, 688),
-    368:     (16, 16, "DXT5", 5, 352),
+# Known square DXT reftextures, indexed by unpacked segment length.
+REF_TEXTURE_FORMATS = {
+    1398128: (1024, "DXT5"), 349552: (512, "DXT5"), 174800: (512, "DXT1"),
+    87408: (256, "DXT5"), 43728: (256, "DXT1"), 43704: (256, "DXT1"),
+    21872: (128, "DXT5"), 10960: (128, "DXT1"), 5520: (64, "DXT5"),
+    5488: (64, "DXT5"), 2768: (64, "DXT1"), 1424: (32, "DXT5"),
+    1392: (32, "DXT5"), 720: (32, "DXT1"), 696: (32, "DXT1"), 368: (16, "DXT5"),
 }
 
 
@@ -35,6 +25,8 @@ def parse_dds_header(data: bytes) -> dict[str, Any]:
     size, flags, h, w, pitch, depth, mips = struct.unpack("<7I", data[4:32])
     pf_size, pf_flags, fourcc_raw = struct.unpack("<2I4s", data[76:88])
 
+    if size != 124 or pf_size != 32 or not w or not h:
+        return {}
     try:
         fourcc = fourcc_raw.decode("ascii").strip("\x00")
     except UnicodeDecodeError:
@@ -84,8 +76,8 @@ def create_dds_header(
 
 
 def decode_dds_to_image(dds_bytes: bytes) -> Image.Image:
-    """Decodes DDS bytes to a Pillow RGBA image."""
-    return Image.open(io.BytesIO(dds_bytes))
+    """Opens a DDS image, retaining its native pixel mode."""
+    return Image.open(io.BytesIO(dds_bytes), formats=["DDS"])
 
 
 def encode_image_to_dds(
@@ -120,7 +112,7 @@ def encode_image_to_dds(
         # Pillow writes 128-byte header + mip data
         mips.append(buf.getvalue()[128:])
 
-        if cur_img.width <= 4 and cur_img.height <= 4:
+        if cur_img.size == (1, 1):
             break
 
         nw = max(1, cur_img.width // 2)
@@ -132,31 +124,62 @@ def encode_image_to_dds(
     return header + payload
 
 
-def wrap_raw_dxt_to_dds(data: bytes) -> tuple[Optional[bytes], Optional[bytes]]:
-    """
-    If data is already DDS, returns (data, None).
-    If data is a raw DXT payload (e.g. from reftextures), creates DDS header and returns (full_dds, footer).
-    Otherwise returns (None, None).
-    """
-    if len(data) >= 128 and data[:4] == DDS_MAGIC:
+@dataclass
+class RefTextureLayout:
+    width: int
+    format: str
+    original: bytes
+    levels: list[tuple[int, int]]
+
+
+def wrap_raw_dxt_to_dds(data: bytes, group_sizes=()):
+    if data.startswith(DDS_MAGIC):
         return data, None
+    if len(data) not in REF_TEXTURE_FORMATS or not group_sizes or sum(group_sizes) != len(data):
+        return None, None
 
-    if len(data) in REF_TEXTURE_SIZES:
-        w, h, fmt, mips, plen = REF_TEXTURE_SIZES[len(data)]
-        dds_hdr = create_dds_header(w, h, fmt, mips)
-        payload = data[:plen]
-        footer = data[plen:]
-        return dds_hdr + payload, footer
+    width, fmt = REF_TEXTURE_FORMATS[len(data)]
+    side = width
+    end = len(data)
+    levels = []
+    # Each streaming group after group zero holds one larger mip.
+    for size in reversed(group_sizes[1:]):
+        end -= size
+        if size != max(1, (side + 3) // 4) ** 2 * (8 if fmt == "DXT1" else 16):
+            return None, None
+        levels.append((end, size))
+        side //= 2
 
-    return None, None
+    # Group zero packs the remaining small mips. Preserve opaque padding
+    # when their individual offsets cannot be inferred from its length.
+    tail = []
+    pos = 0
+    while side:
+        size = max(1, (side + 3) // 4) ** 2 * (8 if fmt == "DXT1" else 16)
+        tail.append((pos, size))
+        pos += size
+        side //= 2
+    if not tail or tail[0][1] > end:
+        return None, None
+    levels.extend(tail if pos == end else tail[:1])
+    payload = b"".join(data[offset:offset+size] for offset, size in levels)
+    return create_dds_header(width, width, fmt, len(levels)) + payload, RefTextureLayout(width, fmt, data, levels)
 
 
-def unwrap_dds_to_raw_dxt(dds_bytes: bytes, original_footer: Optional[bytes] = None) -> bytes:
-    """Strips the 128-byte DDS header and re-appends footer for reftextures."""
-    payload = dds_bytes[128:] if dds_bytes[:4] == DDS_MAGIC else dds_bytes
-    if original_footer:
-        return payload + original_footer
-    return payload
+def unwrap_dds_to_raw_dxt(dds_bytes: bytes, layout: RefTextureLayout) -> bytes:
+    info = parse_dds_header(dds_bytes)
+    if not info or (info["width"], info["height"], info["fourcc"]) != (layout.width, layout.width, layout.format):
+        raise ValueError("Reftexture replacement must match the original dimensions and DXT format")
+    if info["mipmaps"] < len(layout.levels):
+        raise ValueError("Replacement is missing required mip levels")
+    raw = bytearray(layout.original)
+    pos = 128
+    for offset, size in layout.levels:
+        if pos + size > len(dds_bytes):
+            raise ValueError("Incomplete DDS mip data")
+        raw[offset:offset+size] = dds_bytes[pos:pos+size]
+        pos += size
+    return bytes(raw)
 
 
 def extract_all_dds_from_vram(vram_bytes: bytes) -> list[bytes]:

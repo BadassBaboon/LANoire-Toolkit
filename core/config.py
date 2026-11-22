@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 from pathlib import Path
+from .archive_io import staged_output
 from typing import Any, Optional
 
 
@@ -46,7 +47,7 @@ def load_config() -> dict[str, Any]:
             return defaults
         # Ensure all expected keys exist
         for k, v in defaults.items():
-            if k not in data:
+            if not isinstance(data.get(k), str):
                 data[k] = v
         return data
     except Exception as e:
@@ -58,11 +59,8 @@ def save_config(cfg: dict[str, Any]) -> bool:
     """Saves the configuration dictionary to config.json atomically."""
     cfg_path = get_config_path()
     try:
-        tmp_path = cfg_path.with_suffix(".json.tmp")
-        tmp_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-        if cfg_path.exists():
-            cfg_path.unlink()
-        tmp_path.rename(cfg_path)
+        with staged_output(cfg_path) as temp:
+            temp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
         return True
     except Exception as e:
         print(f"Warning: Failed to save {CONFIG_FILENAME}: {e}")

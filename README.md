@@ -43,13 +43,15 @@ The tool reads and writes several formats used by Team Bondi's engine:
 ## Common use cases
 
 ### Upscaling MotionScan face performances
-In the original game, facial performances are recorded at 512x512 or 256x256 resolution. You can export these video streams to MP4, upscale them with an AI video tool (Topaz Video AI, Real-ESRGAN, or similar software) to 1024x1024 or 2048x2048, and batch import them back into the archive. The toolkit updates the macroblock scale and stream headers so the engine renders the higher resolution video across the face mesh.
+In the original game, facial performances are recorded at 512x512 or 256x256 resolution. You can export these video streams to MP4, upscale them with an AI video tool (Topaz Video AI, Real-ESRGAN, or similar software) to 1024x1024 or 2048x2048, and batch import them back into the archive. Use a square video with dimensions divisible by 16 and preserve the original frame count. The toolkit updates the color stream and resolution fields. Verify playback in the game for your target resolution.
 
 ### Upscaling static character skin textures
 Character heads contain separate static textures for diffuse, normal, and specular details. You can export them to PNG or DDS, edit skin pores or facial hair, and inject them back into the TRM model with automatic mipmap regeneration.
 
+Sequential reftexture segments store large mip levels in separate streaming groups. Replacements must match the original dimensions and DXT format and fit the compressed slot. The toolkit preserves unrecognized small-mip padding and data.
+
 ### Inspecting and repacking archives
-You can open any `.big.pc` archive, search files by path or hash, inspect raw hex contents, extract chunks, and repack archives. An automatic `.bak` copy is created whenever you overwrite an active game file.
+You can open any `.big.pc` archive, search files by path or hash, inspect raw hex contents, extract chunks, and repack archives. An in-place save keeps the first backup as `<archive>.bak`. When an indexed replacement outgrows its original space, the writer appends it so that other entries and unindexed game data keep their offsets. This can increase the repacked file size.
 
 ## Graphical interface walkthrough
 
@@ -65,7 +67,7 @@ Click `Open Archive...` and choose any `.big.pc` or `.wad.pc` file from your gam
 ### 2. Searching and filtering
 The search row sits directly below the main actions and stays visible at any window size:
 - Type in the `Search:` box to filter by path, file stem, hex hash (`0x9b1d36d1`), or format (`dgad`, `fsb4`, `trm`).
-- Click `✕` to clear the search filter.
+- Click `×` to clear the search filter.
 - Use the category dropdown to isolate specific asset types:
   - `MotionScan (DGAD)`: Lists all 30 FPS facial performance chunks. In case archives like `cases_1_1.big.pc`, this detects both named entries and hashed `unknown/0x<hash>.bin` entries through 4-byte header sniffing.
   - `Heads/Faces`: Isolates character head chunks containing editable skin textures.
@@ -93,7 +95,7 @@ For large cases containing dozens or hundreds of facial video files:
 3. Click `Batch Export Videos...` and select an output folder. The toolkit exports each clip as an MP4 file and writes a `manifest.json` file recording original resolutions, frame counts, and file hashes.
 4. Process the MP4 files in your video upscaler.
 5. In the toolkit, click `Batch Import Videos...` and select the folder with the upscaled files. The tool matches each file using `manifest.json`. If the manifest was deleted or the upscaler renamed the files (such as adding `_upscaled` or `_4x`), it matches them by the hex hash prefix.
-6. The toolkit re-encodes the upscaled frames to Theora, recalculates macroblock dimensions, and updates each chunk in memory.
+6. The toolkit re-encodes the upscaled frames to Theora, updates the color resolution, and updates each chunk in memory.
 
 ### 6. Saving your changes
 - `Save (In-Place .bak)`: Creates a `.bak` backup copy of your opened archive and overwrites the file with your repacked changes.
@@ -110,7 +112,7 @@ python run_toolkit.py list "C:\Games\L.A.Noire\final\pc\cases_1_1.big.pc"
 
 ### Extract all files from an archive
 ```bash
-python run_toolkit.py extract "C:\Games\L.A.Noire\final\pc\characters.big.pc" ./extracted_characters
+python run_toolkit.py extract "C:\Games\L.A.Noire\final\pc\characters.big.pc" --out ./extracted_characters
 ```
 
 ### Extract MotionScan face videos to MP4
@@ -145,6 +147,8 @@ python run_toolkit.py inject-face "C:\Games\L.A.Noire\final\pc\characters.big.pc
 ```
 
 ### Batch inject a folder of textures
+
+Supply one image per head and texture slot. If you exported both PNG and DDS, put only the edited version in the import folder.
 ```bash
 python run_toolkit.py batch-inject-faces "C:\Games\L.A.Noire\final\pc\characters.big.pc" ./upscaled_textures
 ```
@@ -161,26 +165,30 @@ Disassembly of `LANoire.exe` (specifically the vtable at `0x0125523c` for `Theor
 1. Stream organization:
    Each performance chunk contains synchronized data across three parallel streams:
    - Stream 1: 3D vertex positions that deform the base head mesh over time.
-   - Stream 2: Dynamic normal and wrinkle maps encoded as 128x128 Theora video.
+   - Stream 2: Dynamic normal and wrinkle maps encoded as 128x128 or 64x64 Theora video.
    - Stream 3: Color, lip, and eye texture video encoded as 512x512 or 256x256 Theora video at 30 FPS.
 
 2. Header layout:
    The chunk begins with a 52-byte header:
    - Bytes 0-3: Magic `DGAD` (0x44474144).
    - Bytes 4-7: Version integer (typically 3).
-   - Bytes 8-11: Total frame count.
-   - Bytes 12-15: Frame rate (30 FPS).
-   - Bytes 16-19: Macroblock scale factor, defined as `pixel_width / 4`. For 512x512 video, this value is 128. For 1024x1024 video, this value is 256.
-   - Bytes 20-23: Native pixel resolution (e.g. 512).
+   - Bytes 28-31: Total frame count.
+   - Bytes 32-35: Frame rate (30 FPS).
+   - Bytes 44-47: Normal-map video resolution (128 or 64 in the original clips).
+   - Bytes 48-51: Color video resolution (512 or 256 in the original clips).
 
 3. Frame table:
-   Following the header is a table of 208-byte records for each frame. Each record provides the exact byte size of Stream 1, Stream 2, and Stream 3 payloads for that frame.
+   Each frame starts with a 4-byte length and a 208-byte record containing the three stream sizes. The three payloads follow that record.
 
 4. Theora video packets:
    Frame 0 embeds the three RFC 3533 Ogg Theora identification and setup headers (`\x80theora`, `\x81theora`, `\x82theora`), followed by an end-of-header delimiter (`0xFFFFFFFF`) and the first keyframe packet. Subsequent frames store sequential raw video packets.
 
 5. Resolution scaling:
-   When re-encoding Stream 3 from 512x512 to 1024x1024 or 2048x2048, the toolkit updates the pixel resolution field and scales the macroblock factor proportionally. This allows the game engine to stream and map the higher resolution video across the animated face mesh without texture alignment errors.
+   When replacing Stream 3, the toolkit writes the new color width at byte 48 and preserves the normal-map width at byte 44. The original motion and normal streams are retained when replacing the color stream.
+
+## Tests
+
+Run the regression suite with `python -m unittest discover -s tests -v`. The tests use temporary archives and require no game installation.
 
 ## License
 

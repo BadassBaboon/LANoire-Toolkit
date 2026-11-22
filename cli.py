@@ -1,15 +1,14 @@
 from __future__ import annotations
 import argparse
-import os
-import sys
 from pathlib import Path
 from PIL import Image
 
 from core.archive_big import BigArchive
-from core.archive_wad import WadArchive
-from core.hash_db import HashDatabase
-from core.trm_processor import TRMContainer
+from core import open_archive
+from core.archive_io import extraction_path
+from core.trm_processor import TRMContainer, import_head_textures
 from core.dds_utils import (
+    parse_dds_header,
     encode_image_to_dds,
     decode_dds_to_image,
     wrap_raw_dxt_to_dds,
@@ -20,13 +19,9 @@ from core.dds_utils import (
 def cmd_list(args: argparse.Namespace) -> None:
     path = Path(args.archive)
     if not path.exists():
-        print(f"Error: Archive {path} not found.")
-        return
+        raise SystemExit(f"Error: Archive {path} not found.")
 
-    if path.name.endswith(".wad.pc"):
-        archive = WadArchive(path)
-    else:
-        archive = BigArchive(path)
+    archive = open_archive(path)
 
     print(f"\nArchive: {path.name} ({len(archive.entries)} entries)")
     print(f"{'Hash':<12} {'Size':<10} {'Type':<6} {'Path'}")
@@ -41,7 +36,7 @@ def cmd_list(args: argparse.Namespace) -> None:
             continue
 
         matched += 1
-        size_str = f"{entry.size}" if hasattr(entry, "size") else f"{entry.size1 + entry.size2}"
+        size_str = f"{entry.size}" if hasattr(entry, "size") else f"{entry.size1 + entry.size2 or entry.compressed_size}"
         comp_str = "SGES" if getattr(entry, "is_compressed", False) else "RAW"
         print(f"0x{entry.hash:08x}   {size_str:<10} {comp_str:<6} {entry_path}")
 
@@ -57,82 +52,40 @@ def cmd_extract(args: argparse.Namespace) -> None:
     out_dir = Path(args.out or f"extracted_{path.stem}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if path.name.endswith(".wad.pc"):
-        archive = WadArchive(path)
-        print(f"Extracting {len(archive.entries)} files from {path.name} to {out_dir}...")
-        archive.extract_all(out_dir, progress_cb=lambda i, total, name: print(f"[{i}/{total}] {name}"))
-        print("\nExtraction complete!")
-        return
-
-    archive = BigArchive(path)
+    archive = open_archive(path)
     filter_str = args.filter.lower() if args.filter else ""
     targets = [e for e in archive.entries if not filter_str or filter_str in e.path.lower()]
     print(f"Extracting {len(targets)} files matching '{filter_str}' to {out_dir}...")
 
     for i, e in enumerate(targets):
-        raw_data = archive.read_entry_bytes(e, decompress=not args.raw)
-        dest = out_dir / e.path
+        raw_data = (archive.read_entry_bytes(e, decompress=not args.raw) if isinstance(archive, BigArchive)
+                    else archive.read_entry_bytes(e))
+        dest = extraction_path(out_dir, e.path)
         dest.parent.mkdir(parents=True, exist_ok=True)
 
-        extracted_tex = False
-
+        textures = []
         if args.png or args.dds:
-            # Check TRM for textures
-            if raw_data[:4] == b"trM#":
-                try:
-                    trm = TRMContainer(raw_data)
-                    face_set = trm.get_face_texture_set()
-                    if face_set and face_set.textures:
-                        for tex in face_set.textures:
-                            role = tex.name.lower()
-                            stem = dest.stem
-                            if args.dds:
-                                dds_path = dest.parent / f"{stem}_{role}.dds"
-                                dds_path.write_bytes(tex.dds_bytes)
-                                print(f"  -> Saved {dds_path.name}")
-                            if args.png and tex.image:
-                                png_path = dest.parent / f"{stem}_{role}.png"
-                                tex.image.save(png_path)
-                                print(f"  -> Saved {png_path.name}")
-                        extracted_tex = True
-                except Exception:
-                    pass
+            if raw_data.startswith(b"trM#"):
+                face_set = TRMContainer(raw_data).get_face_texture_set()
+                if face_set:
+                    textures = [(dest.with_name(f"{dest.stem}_{t.name.lower()}.dds"), t.dds_bytes)
+                                for t in face_set.textures]
+            else:
+                groups = archive.reftexture_groups(e) if isinstance(archive, BigArchive) and not args.raw else ()
+                dds, _ = wrap_raw_dxt_to_dds(raw_data, groups)
+                if dds:
+                    textures.append((dest.with_suffix(".dds"), dds))
 
-            # Check standalone DDS
-            if not extracted_tex and raw_data[:4] == b"DDS ":
+        if textures:
+            for dds_path, dds in textures:
                 if args.dds:
-                    dest_dds = dest.with_suffix(".dds")
-                    dest_dds.write_bytes(raw_data)
-                    print(f"  -> Saved {dest_dds.name}")
+                    dds_path.write_bytes(dds)
+                    print(f"  -> Saved {dds_path.name}")
                 if args.png:
-                    try:
-                        img = decode_dds_to_image(raw_data)
-                        dest_png = dest.with_suffix(".png")
-                        img.save(dest_png)
-                        print(f"  -> Saved {dest_png.name}")
-                    except Exception:
-                        pass
-                extracted_tex = True
-
-            # Check raw reftexture segment
-            if not extracted_tex:
-                wrapped_dds, _ = wrap_raw_dxt_to_dds(raw_data)
-                if wrapped_dds:
-                    if args.dds:
-                        dest_dds = dest.with_suffix(".dds")
-                        dest_dds.write_bytes(wrapped_dds)
-                        print(f"  -> Saved {dest_dds.name}")
-                    if args.png:
-                        try:
-                            img = decode_dds_to_image(wrapped_dds)
-                            dest_png = dest.with_suffix(".png")
-                            img.save(dest_png)
-                            print(f"  -> Saved {dest_png.name}")
-                        except Exception:
-                            pass
-                    extracted_tex = True
-
-        if not extracted_tex:
+                    png_path = dds_path.with_suffix(".png")
+                    decode_dds_to_image(dds).save(png_path)
+                    print(f"  -> Saved {png_path.name}")
+        else:
             dest.write_bytes(raw_data)
             print(f"[{i+1}/{len(targets)}] {e.path}")
 
@@ -182,12 +135,21 @@ def cmd_extract_face(args: argparse.Namespace) -> None:
 
                 found += 1
             except Exception as e:
-                print(f"Error processing {entry.path}: {e}")
+                raise ValueError(f"Error processing {entry.path}: {e}") from e
 
     if found == 0:
-        print(f"No matching head chunks found for '{target_name}'.")
+        raise SystemExit(f"No matching head chunks found for '{target_name}'.")
     else:
         print(f"\nSuccessfully extracted face textures for {found} character(s) to {out_dir}!")
+
+
+def select_entry(entries, query):
+    key = query.lower()
+    exact = [e for e in entries if key in (e.path.lower(), Path(e.path).stem.lower(), f"0x{e.hash:08x}")]
+    matches = exact or [e for e in entries if key in e.path.lower()]
+    if len(matches) != 1:
+        raise SystemExit(f"{len(matches)} entries match {query!r}. Specify a unique name, path, or hash.")
+    return matches[0]
 
 
 def cmd_inject_face(args: argparse.Namespace) -> None:
@@ -197,19 +159,10 @@ def cmd_inject_face(args: argparse.Namespace) -> None:
     out_pc = Path(args.repack_out or archive_path)
 
     if not img_path.exists():
-        print(f"Error: Upscaled image {img_path} not found.")
-        return
+        raise SystemExit(f"Error: Upscaled image {img_path} not found.")
 
     archive = BigArchive(archive_path)
-    target_entry = None
-    for e in archive.entries:
-        if head_query in e.path.lower():
-            target_entry = e
-            break
-
-    if not target_entry:
-        print(f"Error: Entry matching '{head_query}' not found in {archive_path.name}.")
-        return
+    target_entry = select_entry(archive.entries, head_query)
 
     print(f"Found target entry: {target_entry.path}")
     raw_data = archive.read_entry_bytes(target_entry, decompress=True)
@@ -217,19 +170,23 @@ def cmd_inject_face(args: argparse.Namespace) -> None:
     # Determine replacement bytes
     if img_path.suffix.lower() == ".dds":
         new_dds_bytes = img_path.read_bytes()
+        decode_dds_to_image(new_dds_bytes).load()
     else:
         print(f"Encoding {img_path.name} to DXT DDS with mipmaps...")
         pil_img = Image.open(img_path)
         tex_idx = args.texture_index
         fourcc = "DXT1" if tex_idx in (0, 2) else "DXT5"
+        if raw_data[:4] != b"trM#":
+            wrapped, _ = wrap_raw_dxt_to_dds(raw_data, archive.reftexture_groups(target_entry))
+            if wrapped:
+                fourcc = parse_dds_header(wrapped)["fourcc"]
         new_dds_bytes = encode_image_to_dds(pil_img, fourcc=fourcc, generate_mips=True)
 
     if raw_data[:4] == b"trM#":
         trm = TRMContainer(raw_data)
         face_set = trm.get_face_texture_set()
         if not face_set:
-            print("Error: Target TRM container does not contain Texture VRAM.")
-            return
+            raise SystemExit("Error: Target TRM container does not contain Texture VRAM.")
 
         print(f"Injecting into sub-texture slot {args.texture_index} (size {len(new_dds_bytes):,} bytes)...")
         face_set.replace_texture(args.texture_index, new_dds_bytes)
@@ -238,7 +195,9 @@ def cmd_inject_face(args: argparse.Namespace) -> None:
         archive.replace_entry(target_entry.hash, new_trm_bytes, size1=new_s1, size2=new_s2)
     else:
         # Check if reftexture segment
-        _, orig_footer = wrap_raw_dxt_to_dds(raw_data)
+        wrapped, orig_footer = wrap_raw_dxt_to_dds(raw_data, archive.reftexture_groups(target_entry))
+        if not wrapped:
+            raise ValueError("Selected entry is not a recognized texture")
         if orig_footer:
             raw_payload = unwrap_dds_to_raw_dxt(new_dds_bytes, orig_footer)
             archive.replace_entry(target_entry.hash, raw_payload)
@@ -256,130 +215,27 @@ def cmd_inject_face(args: argparse.Namespace) -> None:
 
 
 def cmd_batch_inject_faces(args: argparse.Namespace) -> None:
-    import re
     archive_path = Path(args.characters_archive)
-    batch_dir = Path(args.batch_folder)
     out_pc = Path(args.repack_out or archive_path)
-
-    if not batch_dir.exists():
-        print(f"Error: Batch directory {batch_dir} does not exist.")
-        return
-
+    folder = Path(args.batch_folder)
+    if not folder.is_dir():
+        raise SystemExit(f"Batch directory does not exist: {folder}")
     archive = BigArchive(archive_path)
-
-    # Map head chunk stems to entries
-    head_map = {}
-    for entry in archive.entries:
-        if "_head" in entry.path.lower():
-            stem = Path(entry.path).stem.lower()
-            head_map[stem] = entry
-
-    image_exts = {".png", ".dds", ".jpg", ".tga"}
-    image_files = [f for f in batch_dir.rglob("*") if f.suffix.lower() in image_exts]
-    if not image_files:
-        print(f"No image files found in {batch_dir}.")
-        return
-
-    print(f"Found {len(image_files)} potential texture files in {batch_dir}. Matching against archive head chunks...")
-
-    updates_by_entry: dict[int, dict] = {}
-
-    for img_file in image_files:
-        filename = img_file.stem.lower()
-        if "normal" in filename:
-            slot_idx = 1
-            fourcc = "DXT5"
-        elif "specular" in filename or "spec" in filename:
-            slot_idx = 2
-            fourcc = "DXT1"
-        else:
-            slot_idx = 0
-            fourcc = "DXT1"
-
-        parent_stem = img_file.parent.name.lower()
-        matched_stem = None
-        if parent_stem in head_map:
-            matched_stem = parent_stem
-        else:
-            clean_name = filename
-            for tag in ["_diffuse", "_normal", "_specular", "_spec", "_dxt1", "_dxt5", "_raw"]:
-                clean_name = clean_name.replace(tag, "")
-            clean_name = re.sub(r"_\d+x\d+", "", clean_name)
-
-            if clean_name in head_map:
-                matched_stem = clean_name
-            else:
-                for stem in head_map:
-                    if stem in filename or clean_name in stem:
-                        matched_stem = stem
-                        break
-
-        if not matched_stem:
-            print(f"  [Skip] Could not match {img_file.name} to a character head chunk.")
-            continue
-
-        entry = head_map[matched_stem]
-        if entry.hash not in updates_by_entry:
-            updates_by_entry[entry.hash] = {"entry": entry, "slots": {}}
-
-        updates_by_entry[entry.hash]["slots"][slot_idx] = (img_file, fourcc)
-
-    print(f"\nPrepared updates for {len(updates_by_entry)} character head entries.")
-
-    if not updates_by_entry:
-        print("Nothing to inject.")
-        return
-
-    applied_count = 0
-    for entry_hash, update_info in updates_by_entry.items():
-        entry = update_info["entry"]
-        slots = update_info["slots"]
-
-        raw_data = archive.read_entry_bytes(entry, decompress=True)
-        if raw_data[:4] != b"trM#":
-            continue
-
-        try:
-            trm = TRMContainer(raw_data)
-            face_set = trm.get_face_texture_set()
-            if not face_set:
-                continue
-
-            for slot_idx, (img_path, fourcc) in slots.items():
-                if img_path.suffix.lower() == ".dds":
-                    new_dds = img_path.read_bytes()
-                else:
-                    pil_img = Image.open(img_path)
-                    new_dds = encode_image_to_dds(pil_img, fourcc=fourcc, generate_mips=True)
-
-                face_set.replace_texture(slot_idx, new_dds)
-                print(f"  -> Injected {img_path.name} into {entry.path} (slot {slot_idx})")
-
-            trm.apply_face_texture_set(face_set)
-            new_trm, s1, s2 = trm.build()
-            archive.replace_entry(entry.hash, new_trm, size1=s1, size2=s2)
-            applied_count += 1
-        except Exception as e:
-            print(f"Error applying updates to {entry.path}: {e}")
-
+    applied_count = import_head_textures(archive, folder)
+    if not applied_count:
+        raise SystemExit("No matching head textures were found.")
     print(f"\nSuccessfully applied textures to {applied_count} character heads.")
     print(f"Repacking archive to {out_pc}...")
-    archive.repack(
-        out_pc,
-        compress=True,
-        backup_original=True,
-        progress_cb=lambda i, tot, name: print(f"[{i}/{tot}] Repacking...", end="\r"),
-    )
+    archive.repack(out_pc)
     print(f"\nRepacking complete: {out_pc}")
 
 
 def cmd_extract_face_video(args: argparse.Namespace) -> None:
-    from core.dgad_video import batch_export_face_videos, export_face_video, find_ffmpeg
+    from core.dgad_video import batch_export_face_videos, find_ffmpeg
 
     path = Path(args.archive)
     if not path.is_file():
-        print(f"Error: Archive {path} not found.")
-        return
+        raise SystemExit(f"Error: Archive {path} not found.")
 
     out_dir = Path(args.out or f"extracted_videos_{path.stem}")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -407,28 +263,19 @@ def cmd_inject_face_video(args: argparse.Namespace) -> None:
 
     path = Path(args.archive)
     if not path.is_file():
-        print(f"Error: Archive {path} not found.")
-        return
+        raise SystemExit(f"Error: Archive {path} not found.")
 
     video_p = Path(args.video_file)
     if not video_p.is_file():
-        print(f"Error: Video file {video_p} not found.")
-        return
+        raise SystemExit(f"Error: Video file {video_p} not found.")
 
     out_pc = Path(args.repack_out or path)
     archive = BigArchive(path)
 
     # Find matching chunk
     chunk_name = args.head_chunk.lower()
-    target_entry = None
-    for e in archive.entries:
-        if e.path.startswith("intermediate/chunks/da/") and chunk_name in e.path.lower():
-            target_entry = e
-            break
-
-    if not target_entry:
-        print(f"Error: Could not find DA chunk matching '{args.head_chunk}' in {path.name}")
-        return
+    videos = [e for e in archive.entries if e.magic == b"DGAD" or "/da/" in e.path.lower()]
+    target_entry = select_entry(videos, chunk_name)
 
     print(f"Injecting {video_p.name} into {target_entry.path}...")
     orig_chunk = archive.read_entry_bytes(target_entry)
@@ -438,7 +285,7 @@ def cmd_inject_face_video(args: argparse.Namespace) -> None:
         stream_name="color",
         target_bitrate=args.bitrate or "1500k",
     )
-    archive.replace_entry(target_entry.path, new_chunk)
+    archive.replace_entry(target_entry.hash, new_chunk)
     print(f"Updated {target_entry.path} in memory ({len(orig_chunk)} -> {len(new_chunk)} bytes).")
 
     print(f"Repacking archive to {out_pc}...")
@@ -456,13 +303,11 @@ def cmd_batch_inject_face_videos(args: argparse.Namespace) -> None:
 
     path = Path(args.archive)
     if not path.is_file():
-        print(f"Error: Archive {path} not found.")
-        return
+        raise SystemExit(f"Error: Archive {path} not found.")
 
     folder = Path(args.batch_folder)
     if not folder.is_dir():
-        print(f"Error: Folder {folder} not found.")
-        return
+        raise SystemExit(f"Error: Folder {folder} not found.")
 
     out_pc = Path(args.repack_out or path)
     archive = BigArchive(path)
@@ -477,8 +322,7 @@ def cmd_batch_inject_face_videos(args: argparse.Namespace) -> None:
     )
 
     if not injected:
-        print(f"No matching face video files found in {folder}!")
-        return
+        raise SystemExit(f"No matching face video files found in {folder}")
 
     print(f"\nSuccessfully injected {len(injected)} face videos into archive.")
     print(f"Repacking archive to {out_pc}...")
@@ -521,7 +365,7 @@ def main():
     p_inj.add_argument("characters_archive", help="Path to archive (e.g. characters.big.pc)")
     p_inj.add_argument("head_chunk", help="Chunk name or substring (e.g. cole_phelps_head_new)")
     p_inj.add_argument("texture_image", help="Path to edited PNG or DDS image")
-    p_inj.add_argument("--texture-index", "-i", type=int, default=0, help="0: Diffuse, 1: Normal, 2: Specular")
+    p_inj.add_argument("--texture-index", "-i", type=int, choices=(0, 1, 2), default=0, help="0: Diffuse, 1: Normal, 2: Specular")
     p_inj.add_argument("--repack-out", "-r", help="Output .big.pc path (default: overwrite with backup)")
 
     # batch-inject-faces
@@ -553,9 +397,24 @@ def main():
     p_v_binj.add_argument("--bitrate", default="1500k", help="Theora re-encoding bitrate (default: 1500k)")
     p_v_binj.add_argument("--repack-out", "-r", help="Output .big.pc path (default: overwrite with backup)")
 
+    p_repack = subparsers.add_parser("repack", help="Repack a BIG or WAD archive")
+    p_repack.add_argument("archive")
+    p_repack.add_argument("output")
+
     args = parser.parse_args()
 
-    if args.command == "list":
+    try:
+        dispatch(args)
+    except (OSError, ValueError, RuntimeError, IndexError) as err:
+        parser.exit(1, f"Error: {err}\n")
+
+
+def dispatch(args):
+    if args.command == "repack":
+        source = Path(args.archive)
+        archive = open_archive(source)
+        print(archive.repack(args.output))
+    elif args.command == "list":
         cmd_list(args)
     elif args.command == "extract":
         cmd_extract(args)

@@ -1,13 +1,16 @@
 from __future__ import annotations
+from collections import Counter
 import io
 import os
-import shutil
 import struct
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
+
+from .archive_io import staged_output
+from .config import get_ffmpeg_path
 
 # Standard Ogg CRC-32 table generator (RFC 3533 polynomial 0x04C11DB7)
 _CRC_LOOKUP = [0] * 256
@@ -29,21 +32,36 @@ def calc_ogg_crc(data: bytes) -> int:
 
 
 def make_ogg_page(header_type: int, granulepos: int, serial: int, page_no: int, packets: list[bytes]) -> bytes:
-    """Builds a single RFC 3533 Ogg Page with the specified packets and checksum."""
+    """Packs packets into checksummed Ogg pages, continuing large packets across pages."""
     seg_table = bytearray()
     payload = bytearray()
     for pkt in packets:
-        l = len(pkt)
-        while l >= 255:
-            seg_table.append(255)
-            l -= 255
-        seg_table.append(l)
+        full_segments, remainder = divmod(len(pkt), 255)
+        seg_table.extend([255] * full_segments)
+        seg_table.append(remainder)
         payload.extend(pkt)
 
+    pages = bytearray()
+    consumed = 0
+    for i in range(0, len(seg_table), 255):
+        segments = seg_table[i:i+255]
+        final = i + len(segments) == len(seg_table)
+        flags = header_type if final else header_type & ~4
+        if i:
+            flags = (flags & ~2) | int(seg_table[i - 1] == 255)
+        size = sum(segments)
+        granule = granulepos if final else (0 if any(n < 255 for n in segments) else 0xffffffffffffffff)
+        pages.extend(_ogg_page(flags, granule, serial, page_no + i // 255, segments,
+                               payload[consumed:consumed + size]))
+        consumed += size
+    return bytes(pages)
+
+
+def _ogg_page(header_type, granulepos, serial, page_no, seg_table, payload):
     hdr = bytearray(b"OggS\x00")
     hdr.append(header_type)
     hdr.extend(struct.pack("<QII", granulepos, serial, page_no))
-    hdr.extend(b"\x00\x00\x00\x00")  # Checksum placeholder at offset 22
+    hdr.extend(bytes(4))
     hdr.append(len(seg_table))
     hdr.extend(seg_table)
 
@@ -58,26 +76,26 @@ def demux_ogg_packets(ogv_data: bytes) -> list[bytes]:
     pos = 0
     packets: list[bytes] = []
     current_packet = bytearray()
+    stream_serial = None
 
     while pos < len(ogv_data):
-        if ogv_data[pos:pos+4] != b"OggS":
-            # Search for next OggS sync code if slight desync
-            next_sync = ogv_data.find(b"OggS", pos + 1)
-            if next_sync == -1:
-                break
-            pos = next_sync
-
-        if pos + 27 > len(ogv_data):
-            break
-
+        if pos + 27 > len(ogv_data) or ogv_data[pos:pos+5] != b"OggS\x00":
+            raise ValueError("Incomplete or invalid Ogg page")
         n_segs = ogv_data[pos + 26]
         seg_table = ogv_data[pos + 27 : pos + 27 + n_segs]
         payload_offset = pos + 27 + n_segs
+        page_end = payload_offset + sum(seg_table)
+        if page_end > len(ogv_data):
+            raise ValueError("Incomplete Ogg page payload")
+        serial = struct.unpack_from("<I", ogv_data, pos + 14)[0]
+        if stream_serial is None and ogv_data[pos+5] & 2 and ogv_data.startswith(b"\x80theora", payload_offset):
+            stream_serial = serial
+        if serial != stream_serial:
+            pos = page_end
+            continue
 
         curr_p = payload_offset
         for seg_len in seg_table:
-            if curr_p + seg_len > len(ogv_data):
-                break
             current_packet.extend(ogv_data[curr_p : curr_p + seg_len])
             curr_p += seg_len
             if seg_len < 255:
@@ -86,10 +104,9 @@ def demux_ogg_packets(ogv_data: bytes) -> list[bytes]:
 
         pos = curr_p
 
+    if current_packet:
+        raise ValueError("Incomplete Theora packet")
     return packets
-
-
-from .config import get_ffmpeg_path
 
 
 def find_ffmpeg() -> Optional[str]:
@@ -111,10 +128,14 @@ class DGADInfo:
     version: int
     frame_count: int
     fps: int
-    macroblock_scale: int
+    macroblock_scale: int  # Historical API name for the normal-stream resolution.
     resolution: int
     frames: list[DGADFrame]
     raw_header_52: bytes
+
+    @property
+    def normal_resolution(self) -> int:
+        return self.macroblock_scale
 
 
 def parse_dgad_chunk(data: bytes) -> DGADInfo:
@@ -135,16 +156,18 @@ def parse_dgad_chunk(data: bytes) -> DGADInfo:
 
     while pos < len(data):
         if pos + 4 > len(data):
-            break
+            raise ValueError("Incomplete DGAD frame length")
         flen = struct.unpack("<I", data[pos : pos + 4])[0]
         fdata = data[pos + 4 : pos + 4 + flen]
-        if len(fdata) < 208:
-            break
+        if len(fdata) != flen or flen < 208:
+            raise ValueError("Incomplete DGAD frame")
 
         s1_sz = struct.unpack("<I", fdata[180:184])[0]
         s2_sz = struct.unpack("<I", fdata[188:192])[0]
         s3_sz = struct.unpack("<I", fdata[196:200])[0]
 
+        if 208 + s1_sz + s2_sz + s3_sz != flen:
+            raise ValueError("Inconsistent DGAD stream lengths")
         s1_bytes = fdata[208 : 208 + s1_sz]
         s2_bytes = fdata[208 + s1_sz : 208 + s1_sz + s2_sz]
         s3_bytes = fdata[208 + s1_sz + s2_sz : 208 + s1_sz + s2_sz + s3_sz]
@@ -162,6 +185,8 @@ def parse_dgad_chunk(data: bytes) -> DGADInfo:
         f_idx += 1
         pos += 4 + flen
 
+    if not frames or len(frames) != frame_count:
+        raise ValueError("DGAD frame count does not match its header")
     return DGADInfo(
         version=version,
         frame_count=frame_count,
@@ -205,23 +230,24 @@ def extract_video_stream_to_ogv(dgad: DGADInfo, stream_name: str = "color", seri
 
     # Page 1: Comment and Setup headers (Packets 1 and 2)
     pages.append(make_ogg_page(0x00, 0, serial, page_no, [header_packets[1], header_packets[2]]))
-    page_no += 1
+    header_segments = sum(len(packet) // 255 + 1 for packet in header_packets[1:3])
+    page_no += (header_segments + 254) // 255
 
     # Video pages
     last_keyframe = 0
-    kfgshift = 6
+    kfgshift = (int.from_bytes(header_packets[0][40:42], "big") >> 5) & 31
 
     for idx, pkt in enumerate(video_packets):
-        is_key = (pkt[0] & 0x40) == 0
+        is_key = pkt and (pkt[0] & 0x40) == 0
         if is_key:
             last_keyframe = idx
 
-        granpos = (last_keyframe << kfgshift) | (idx - last_keyframe)
+        granpos = ((last_keyframe + 1) << kfgshift) | (idx - last_keyframe)
         is_last = idx == len(video_packets) - 1
         flags = 0x04 if is_last else 0x00
 
         pages.append(make_ogg_page(flags, granpos, serial, page_no, [pkt]))
-        page_no += 1
+        page_no += (len(pkt) // 255 + 1 + 254) // 255
 
     return b"".join(pages)
 
@@ -234,6 +260,7 @@ def extract_first_frame_image(chunk_data: bytes, stream_name: str = "color") -> 
     try:
         from PIL import Image
         dgad = parse_dgad_chunk(chunk_data)
+        dgad.frames = dgad.frames[:1]
         ogv_data = extract_video_stream_to_ogv(dgad, stream_name=stream_name)
         cmd = [
             ffmpeg,
@@ -248,13 +275,8 @@ def extract_first_frame_image(chunk_data: bytes, stream_name: str = "color") -> 
             "png",
             "pipe:1",
         ]
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-        png_bytes, _ = proc.communicate(input=ogv_data, timeout=5)
+        png_bytes = subprocess.run(cmd, input=ogv_data, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, timeout=5, check=True).stdout
         if png_bytes:
             return Image.open(io.BytesIO(png_bytes))
     except Exception:
@@ -298,27 +320,36 @@ def export_face_video(
         tmp_ogv_name = tmp_ogv.name
 
     try:
-        cmd = [
-            ffmpeg,
-            "-y",
-            "-i",
-            tmp_ogv_name,
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            str(out_path),
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode != 0:
-            raise RuntimeError(f"FFmpeg transcode failed:\n{res.stderr}")
+        with staged_output(out_path) as temp:
+            cmd = [ffmpeg, "-y", "-v", "error", "-xerror", "-i", tmp_ogv_name,
+                   "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                   "-f", "mp4", str(temp)]
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode:
+                raise RuntimeError(f"FFmpeg transcode failed:\n{res.stderr}")
     finally:
         if os.path.exists(tmp_ogv_name):
             os.remove(tmp_ogv_name)
 
     return out_path
+
+
+def _encode_theora(ffmpeg, source, fps, bitrate):
+    with tempfile.TemporaryDirectory() as directory:
+        encoded = str(Path(directory) / "stream.ogv")
+        cmd = [ffmpeg, "-y", "-v", "error", "-xerror", "-i", str(source), "-an",
+               "-pix_fmt", "yuv420p", "-r", str(fps), "-c:v", "libtheora", "-b:v", bitrate]
+        # Some libtheora builds successfully encode inter frames that fail
+        # to decode. Retry with independently decodable keyframes in that case.
+        for options in ([], ["-g", "1"]):
+            res = subprocess.run([*cmd, *options, encoded], capture_output=True, text=True)
+            if res.returncode:
+                raise RuntimeError(f"FFmpeg encoding to Theora failed:\n{res.stderr}")
+            check = subprocess.run([ffmpeg, "-v", "error", "-xerror", "-i", encoded,
+                                    "-f", "null", "-"], capture_output=True, text=True)
+            if not check.returncode and not check.stderr.strip():
+                return Path(encoded).read_bytes()
+        raise ValueError(f"Encoded Theora failed to decode:\n{check.stderr}")
 
 
 def rebuild_dgad_with_video(
@@ -344,31 +375,7 @@ def rebuild_dgad_with_video(
         if not ffmpeg:
             raise RuntimeError("FFmpeg is required to re-encode video to Theora .ogv format!")
 
-        with tempfile.NamedTemporaryFile(suffix=".ogv", delete=False) as tmp_ogv:
-            tmp_ogv_name = tmp_ogv.name
-
-        try:
-            cmd = [
-                ffmpeg,
-                "-y",
-                "-i",
-                str(in_video),
-                "-r",
-                str(dgad.fps),
-                "-c:v",
-                "libtheora",
-                "-b:v",
-                target_bitrate,
-                tmp_ogv_name,
-            ]
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            if res.returncode != 0:
-                raise RuntimeError(f"FFmpeg encoding to Theora failed:\n{res.stderr}")
-            with open(tmp_ogv_name, "rb") as f:
-                ogv_bytes = f.read()
-        finally:
-            if os.path.exists(tmp_ogv_name):
-                os.remove(tmp_ogv_name)
+        ogv_bytes = _encode_theora(ffmpeg, in_video, dgad.fps, target_bitrate)
 
     # Demux packets from OGV
     pkts = demux_ogg_packets(ogv_bytes)
@@ -384,8 +391,17 @@ def rebuild_dgad_with_video(
         )
 
     # Read dimensions from identification header
-    fmbw, fmbh = struct.unpack(">HH", hdr0[10:14])
-    new_width = fmbw * 16
+    if len(hdr0) < 42 or any(not packet.startswith(bytes([0x80 + i]) + b"theora")
+                             for i, packet in enumerate((hdr0, hdr1, hdr2))):
+        raise ValueError("Invalid Theora headers")
+    new_width = int.from_bytes(hdr0[14:17], "big")
+    height = int.from_bytes(hdr0[17:20], "big")
+    fps_num, fps_den = struct.unpack_from(">II", hdr0, 22)
+    if not new_width or height != new_width or new_width % 16:
+        raise ValueError("MotionScan requires square video with dimensions divisible by 16")
+    if not fps_den or fps_num != dgad.fps * fps_den:
+        raise ValueError(f"MotionScan replacement must use {dgad.fps} FPS")
+
 
     # Build stream payload for each frame
     new_stream_per_frame: list[bytes] = []
@@ -402,9 +418,8 @@ def rebuild_dgad_with_video(
 
     # Rebuild DGAD binary
     out = bytearray(dgad.raw_header_52)
-    if stream_name == "color":
-        struct.pack_into("<I", out, 44, new_width // 4)
-        struct.pack_into("<I", out, 48, new_width)
+    resolution_offset = {"normals": 44, "color": 48}[stream_name]
+    struct.pack_into("<I", out, resolution_offset, new_width)
 
     for i, frame in enumerate(dgad.frames):
         s1 = frame.stream1_mocap
@@ -465,11 +480,15 @@ def batch_export_face_videos(
     if total == 0:
         return 0
 
+    stem_counts = Counter(Path(e.path).stem.lower() for e in da_entries)
+    failures = []
     manifest: dict[str, dict] = {}
     exported_count = 0
 
     for i, entry in enumerate(da_entries):
         base_name = Path(entry.path).stem
+        if stem_counts[base_name.lower()] > 1:
+            base_name = f"0x{entry.hash:08x}_{base_name}"
         if progress_cb:
             progress_cb(i + 1, total, base_name)
 
@@ -479,7 +498,8 @@ def batch_export_face_videos(
 
         try:
             dgad = parse_dgad_chunk(chunk_data)
-        except Exception:
+        except ValueError as err:
+            failures.append(f"{base_name}: {err}")
             continue
 
         # Export color video (stream 3)
@@ -503,7 +523,7 @@ def batch_export_face_videos(
                 "exported_file": video_filename,
             }
         except Exception as err:
-            print(f"Error exporting {base_name}: {err}")
+            failures.append(f"{base_name}: {err}")
 
         # Optionally export normals video (stream 2)
         if export_normals:
@@ -517,13 +537,15 @@ def batch_export_face_videos(
                     stream_name="normals",
                 )
             except Exception as err:
-                print(f"Error exporting normals for {base_name}: {err}")
+                failures.append(f"{base_name} normals: {err}")
 
     # Write manifest.json
     manifest_path = out_dir / "manifest.json"
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
+    if failures:
+        raise ValueError(f"Exported {exported_count} clips. {len(failures)} exports failed. First error: {failures[0]}")
     return exported_count
 
 
@@ -577,8 +599,10 @@ def batch_import_face_videos(
 
     matched_pairs: list[tuple[Path, Any]] = []
 
-    for v_file in video_files:
+    for v_file in sorted(video_files):
         v_stem = v_file.stem.lower()
+        if stream_name == "color" and "_normals" in v_stem:
+            continue
 
         # 1. Check manifest match
         target_entry = None
@@ -628,16 +652,18 @@ def batch_import_face_videos(
 
             if not target_entry:
                 # Substring match if clean_stem begins with an entry stem
-                for e_stem, e_obj in da_by_stem.items():
-                    if clean_stem.startswith(e_stem):
-                        target_entry = e_obj
-                        break
+                stems = [stem for stem in da_by_stem if clean_stem.startswith(stem + "_")]
+                if stems:
+                    target_entry = da_by_stem[max(stems, key=len)]
 
         if target_entry:
             matched_pairs.append((v_file, target_entry))
 
+    hashes = [entry.hash for _, entry in matched_pairs]
+    if len(set(hashes)) != len(hashes):
+        raise ValueError("Multiple videos match the same archive entry. Select one replacement per entry.")
     total = len(matched_pairs)
-    injected_paths: list[str] = []
+    updates = []
 
     for idx, (v_file, entry) in enumerate(matched_pairs):
         if progress_cb:
@@ -651,10 +677,11 @@ def batch_import_face_videos(
                 stream_name=stream_name,
                 target_bitrate=target_bitrate,
             )
-            archive.replace_entry(entry.hash, new_chunk_data)
-            injected_paths.append(entry.path)
+            updates.append((entry, new_chunk_data))
         except Exception as err:
-            print(f"Failed to inject {v_file.name} into {entry.path}: {err}")
+            raise ValueError(f"Could not import {v_file.name} into {entry.path}: {err}") from err
 
-    return injected_paths
+    for entry, data in updates:
+        archive.replace_entry(entry.hash, data)
+    return [entry.path for entry, _ in updates]
 

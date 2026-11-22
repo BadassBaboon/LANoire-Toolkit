@@ -40,7 +40,7 @@ config.json
 
 # Local testing and scratch data
 extracted_test/
-test_*.py
+/test_*.py
 test_export_inject.py
 test_repack_mod.py
 scratch/
